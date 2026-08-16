@@ -16,7 +16,7 @@ namespace CoopFeasibilityMod;
 
 public sealed class CoopFeasibility : IMod
 {
-    private const string Version = "0.1.2";
+    private const string Version = "0.1.3";
     private const uint ExpectedCollisionFunction = 0x800EF45C;
 
     private const uint GameStepAddress = 0x80073060;
@@ -103,12 +103,18 @@ public sealed class CoopFeasibility : IMod
     private byte _rightYMax;
     private ushort _virtualPressed;
     private ushort _virtualPreviousHeld;
+    private ushort _virtualRawHeld;
+    private ushort _virtualRawSeen;
     private ushort _virtualDownSeen;
     private ushort _virtualUpSeen;
     private bool _virtualNeutralSeen;
     private bool _virtualNeutralObserved;
     private int _virtualSuppressionFrames;
     private int _virtualForcedReleases;
+    private AutoTestState _autoTestState;
+    private int _autoTestFrame;
+    private int _autoTestRuns;
+    private string _autoTestStatus = "idle";
 
     private bool _proxyInitialized;
     private int _proxyX;
@@ -186,6 +192,8 @@ public sealed class CoopFeasibility : IMod
 
     public void DrawSettings()
     {
+        if (_autoTestState == AutoTestState.Running)
+            CancelAutomaticTest("settings reopened");
         if (_virtualKeyboard)
         {
             if (_virtualPressed != 0) _virtualForcedReleases++;
@@ -219,6 +227,9 @@ public sealed class CoopFeasibility : IMod
         if (ImGui.Button("Reset proxy to Player 1")) QueueProxyReset();
         ImGui.SameLine();
         if (ImGui.Button("Release virtual keys")) ReleaseVirtualKeys();
+        if (ImGui.Button("Run automatic P2 movement test")) QueueAutomaticTest();
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel automatic test")) CancelAutomaticTest("cancelled by user");
         if (ImGui.Button("Print report to console")) Console.WriteLine($"[CoopProbe] {BuildReport()}");
         ImGui.SameLine();
         if (ImGui.Button("Copy report")) ImGui.SetClipboardText(BuildReport());
@@ -231,7 +242,8 @@ public sealed class CoopFeasibility : IMod
         ImGui.Text($"Operation: {_operationStatus}");
         ImGui.Text($"P2 source: {(_virtualKeyboard ? "virtual keyboard" : "configured Pad 2")} | runtime connection: {Controller.Connected2} | changes: {_connectionChanges}");
         ImGui.Text($"Raw host: 0x{_hostState:X4} | pad event: 0x{_padState:X4}");
-        ImGui.Text($"Virtual held/down/up: 0x{_virtualPressed:X4}/0x{_virtualDownSeen:X4}/0x{_virtualUpSeen:X4} | forced releases: {_virtualForcedReleases}");
+        ImGui.Text($"Virtual output/raw/seen: 0x{_virtualPressed:X4}/0x{_virtualRawHeld:X4}/0x{_virtualRawSeen:X4} | down/up: 0x{_virtualDownSeen:X4}/0x{_virtualUpSeen:X4}");
+        ImGui.Text($"Automatic test: {_autoTestStatus} | frame {_autoTestFrame} | completed runs {_autoTestRuns} | forced releases {_virtualForcedReleases}");
         ImGui.Text($"Game pressed: 0x{_gamePressed:X4} | tapped: 0x{_gameTapped:X4}");
         if (_virtualKeyboard)
         {
@@ -277,6 +289,7 @@ public sealed class CoopFeasibility : IMod
 
             if (_virtualKeyboard) ReconcileVirtualKeys();
             if (_virtualSuppressionFrames > 0) _virtualSuppressionFrames--;
+            if (_virtualKeyboard) AdvanceAutomaticTest(e.Memory);
 
             _hostState = Controller.State2;
             ushort pressed = (ushort)~_hostState;
@@ -329,6 +342,7 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
+            CancelAutomaticTest("player reloaded");
             ReleaseVirtualKeys();
             _proxyInitialized = false;
             _roomKnown = false;
@@ -348,6 +362,7 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
+            CancelAutomaticTest("room layer changed");
             ReleaseVirtualKeys();
             _roomLayerEvents++;
             BeginTransition();
@@ -902,11 +917,17 @@ public sealed class CoopFeasibility : IMod
         _neutralSeen = false;
         _virtualPressed = 0;
         _virtualPreviousHeld = ReadVirtualKeysDown();
+        _virtualRawHeld = _virtualPreviousHeld;
+        _virtualRawSeen = 0;
         _virtualDownSeen = _virtualUpSeen = 0;
         _virtualNeutralSeen = false;
         _virtualNeutralObserved = false;
         _virtualSuppressionFrames = 2;
         _virtualForcedReleases = 0;
+        _autoTestState = AutoTestState.Idle;
+        _autoTestFrame = 0;
+        _autoTestRuns = 0;
+        _autoTestStatus = "idle";
         _visualConfirmed = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
         _leftXMax = _leftYMax = _rightXMax = _rightYMax = 0;
@@ -941,6 +962,7 @@ public sealed class CoopFeasibility : IMod
     private void Fail(string subsystem, Exception ex)
     {
         if (_fatal) return;
+        CancelAutomaticTest("diagnostic circuit breaker");
         _fatal = true;
         _enabled = false;
         _proxyInitialized = false;
@@ -975,7 +997,7 @@ public sealed class CoopFeasibility : IMod
             _minimumFreeAttack >= 4 && _minimumLongestAttack >= 2 ? 'P' : 'W';
 
         string inputReport = _virtualKeyboard
-            ? $"I={input}:K:-/{padCount}/{gameCount}/{tapCount}/A- K={virtualDownCount}/{virtualUpCount}/H{_virtualPressed:X4}/N{Bool(_virtualNeutralObserved)}"
+            ? $"I={input}:K:-/{padCount}/{gameCount}/{tapCount}/A- K={virtualDownCount}/{virtualUpCount}/H{_virtualPressed:X4}/R{_virtualRawHeld:X4}/U{_virtualRawSeen:X4}/N{Bool(_virtualNeutralObserved)}/S{_virtualSuppressionFrames}"
             : $"I={input}:C:{hostCount}/{padCount}/{gameCount}/{tapCount}/A{axisCount} K=-";
 
         return $"P2D1 V={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
@@ -984,7 +1006,8 @@ public sealed class CoopFeasibility : IMod
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents} " +
                $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
-               $"G={_safeCode}:E{Bool(_enabled)}S{Bool(_safeFrame)}P{Bool(_proxyInitialized)} Q={_diagnosticGeneration}/{_proxyResetRequests}/{_proxyResetCompletions}/{Bool(_reinitializeRequested)} E={ErrorCode()}";
+               $"G={_safeCode}:E{Bool(_enabled)}S{Bool(_safeFrame)}P{Bool(_proxyInitialized)} Q={_diagnosticGeneration}/{_proxyResetRequests}/{_proxyResetCompletions}/{Bool(_reinitializeRequested)} " +
+               $"A={AutoTestCode()}:{_autoTestFrame}/{_autoTestRuns} E={ErrorCode()}";
     }
 
     private string MissingHostButtons()
@@ -1048,7 +1071,9 @@ public sealed class CoopFeasibility : IMod
     private void ReconcileVirtualKeys()
     {
         ushort held = ReadVirtualKeysDown();
-        if (_virtualSuppressionFrames > 0 || !_enabled || _fatal || HostUiCapturesKeyboard())
+        _virtualRawHeld = held;
+        _virtualRawSeen |= held;
+        if (_virtualSuppressionFrames > 0 || !_enabled || _fatal)
         {
             if (_virtualPressed != 0) _virtualForcedReleases++;
             _virtualPressed = 0;
@@ -1073,7 +1098,6 @@ public sealed class CoopFeasibility : IMod
 
     private bool VirtualInputAllowed(IMemory memory) =>
         _enabled && !_fatal && _virtualSuppressionFrames == 0 &&
-        !HostUiCapturesKeyboard() &&
         Game.Available && Game.InAlucardMode() && !Game.IsLoading &&
         !Game.MenuOpen && !Game.MapOpen && DisplayModeHooks.IsStage &&
         memory.ReadU32(CutsceneControlAddress) == 0 &&
@@ -1081,6 +1105,7 @@ public sealed class CoopFeasibility : IMod
 
     private void SetVirtualKeyboard(bool enabled)
     {
+        CancelAutomaticTest("input mode changed");
         ReleaseVirtualKeys();
         _virtualKeyboard = enabled;
         _physicalControllerTest = false;
@@ -1105,6 +1130,104 @@ public sealed class CoopFeasibility : IMod
         _reinitializeRequested = true;
         _operationStatus = "Proxy reset queued";
     }
+
+    private void QueueAutomaticTest()
+    {
+        if (!_virtualKeyboard)
+        {
+            _autoTestStatus = "virtual keyboard mode is required";
+            return;
+        }
+        ReleaseVirtualKeys();
+        _autoTestState = AutoTestState.Queued;
+        _autoTestFrame = 0;
+        _autoTestStatus = "queued; close the Mods window";
+    }
+
+    private void AdvanceAutomaticTest(IMemory memory)
+    {
+        if (_autoTestState == AutoTestState.Queued)
+        {
+            _virtualPressed = 0;
+            if (_virtualSuppressionFrames != 0 || !AutomaticInputSafe(memory) || !_grounded)
+                return;
+            _autoTestState = AutoTestState.Running;
+            _autoTestFrame = 0;
+            _autoTestStatus = "running";
+        }
+
+        if (_autoTestState != AutoTestState.Running) return;
+        if (!AutomaticInputSafe(memory))
+        {
+            CancelAutomaticTest("gameplay became unsafe");
+            return;
+        }
+
+        ushort mask;
+        if (_autoTestFrame < 12) mask = (ushort)GameButton.Right;
+        else if (_autoTestFrame < 16) mask = 0;
+        else if (_autoTestFrame < 28) mask = (ushort)GameButton.Left;
+        else if (_autoTestFrame < 32) mask = 0;
+        else if (_autoTestFrame < 33)
+        {
+            if (!_grounded)
+            {
+                CancelAutomaticTest("jump phase was not grounded");
+                return;
+            }
+            mask = (ushort)GameButton.Cross;
+        }
+        else if (_autoTestFrame < 64) mask = 0;
+        else
+        {
+            _virtualPressed = 0;
+            _autoTestState = AutoTestState.Completed;
+            _autoTestRuns++;
+            _autoTestStatus = "completed; input returned to neutral";
+            return;
+        }
+
+        _virtualPressed = mask;
+        _autoTestFrame++;
+    }
+
+    private bool AutomaticInputSafe(IMemory memory)
+    {
+        if (!_enabled || _fatal || _collisionDisabled || !_proxyInitialized || _transitionPending) return false;
+        if (!Game.Available || !Game.InAlucardMode() || Game.IsLoading || Game.MenuOpen || Game.MapOpen) return false;
+        if (!DisplayModeHooks.IsStage || memory.ReadU32(GameStepAddress) != (uint)PlayStep.Default ||
+            memory.ReadU32(EngineStepAddress) != 1 || memory.ReadU32(CutsceneControlAddress) != 0 ||
+            IsSpecialTransition(memory.ReadU32(SpecialTransitionAddress)))
+            return false;
+
+        uint foreground = memory.ReadU32(TilemapAddress);
+        uint tileDefinitions = memory.ReadU32(TileDefinitionsAddress);
+        if (!IsGuestPointer(foreground) || !IsGuestPointer(tileDefinitions) ||
+            !IsGuestPointer(memory.ReadU32(tileDefinitions + 0x0C)))
+            return false;
+        uint horizontalSize = memory.ReadU32(TilemapAddress + 0x20);
+        uint verticalSize = memory.ReadU32(TilemapAddress + 0x24);
+        return horizontalSize is > 0 and <= 0x100 && verticalSize is > 0 and <= 0x100 &&
+               memory.ReadU32(GameApi.CheckCollisionAddr) == ExpectedCollisionFunction;
+    }
+
+    private void CancelAutomaticTest(string reason)
+    {
+        if (_autoTestState is AutoTestState.Idle or AutoTestState.Completed or AutoTestState.Cancelled) return;
+        _virtualPressed = 0;
+        _autoTestState = AutoTestState.Cancelled;
+        _autoTestStatus = reason;
+    }
+
+    private char AutoTestCode() => _autoTestState switch
+    {
+        AutoTestState.Idle => 'I',
+        AutoTestState.Queued => 'Q',
+        AutoTestState.Running => 'R',
+        AutoTestState.Completed => 'P',
+        AutoTestState.Cancelled => 'X',
+        _ => '?',
+    };
 
     private static bool IsGamePressed(GameButton button) => (Game.Pressed2 & (ushort)button) != 0;
 
@@ -1131,8 +1254,6 @@ public sealed class CoopFeasibility : IMod
     private static bool IsSpecialTransition(uint value) =>
         value is >= 2 and <= 6 || (value & 0x88000000) != 0;
 
-    private static bool HostUiCapturesKeyboard() => ImGui.GetIO().WantCaptureKeyboard;
-
     private void BeginTransition()
     {
         if (!_roomKnown) return;
@@ -1151,6 +1272,8 @@ public sealed class CoopFeasibility : IMod
         _neutralSeen = false;
         _virtualDownSeen = _virtualUpSeen = 0;
         _virtualPreviousHeld = ReadVirtualKeysDown();
+        _virtualRawHeld = _virtualPreviousHeld;
+        _virtualRawSeen = 0;
         _virtualNeutralSeen = false;
         _virtualNeutralObserved = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
@@ -1169,6 +1292,15 @@ public sealed class CoopFeasibility : IMod
 
     private string ErrorCode() => _fatal ? "X" : _collisionDisabled ?
         (_collisionFunction != ExpectedCollisionFunction ? $"A{_collisionFunction:X8}" : $"C{_lastRejectedCorrection}") : "0";
+
+    private enum AutoTestState
+    {
+        Idle,
+        Queued,
+        Running,
+        Completed,
+        Cancelled,
+    }
 
     private readonly struct CollisionResult
     {

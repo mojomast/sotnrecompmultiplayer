@@ -1,7 +1,7 @@
 {
   "id": "coop-feasibility",
   "name": "Co-op Feasibility Probe",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "mojomast",
   "description": "Tests virtual or physical controller 2 input, proxy movement, terrain collision, rendering, room transitions, and entity capacity without changing game state.",
   "dependencies": []
