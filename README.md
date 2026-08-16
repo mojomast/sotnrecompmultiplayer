@@ -4,7 +4,7 @@ An experimental [SymphonyRecomp](https://github.com/BlackLabelHQ/SymphonyRecomp)
 
 ## Project Status
 
-This repository is at the Player 2 feasibility stage. Version `0.1.1` provides a diagnostic proxy that tests the engine paths needed before local or networked co-op can be implemented safely.
+This repository is at the Player 2 feasibility stage. Version `0.1.2` provides a diagnostic proxy that tests the engine paths needed before local or networked co-op can be implemented safely.
 
 This is not a complete co-op mod. It tests the plumbing needed before one can be built:
 
@@ -40,7 +40,7 @@ Use a legally owned US PlayStation copy of Castlevania: Symphony of the Night. O
 
 SymphonyRecomp compiles the C# files under `source/` at runtime.
 
-When updating, run `git pull`, restart or reload the mod, and confirm `Co-op Feasibility Probe v0.1.1` appears in its settings panel.
+When updating, run `git pull`, restart or reload the mod, and confirm `Co-op Feasibility Probe v0.1.2` appears in its settings panel.
 
 ## Test Procedure
 
@@ -49,7 +49,7 @@ Use only this diagnostic mod for the first test when possible.
 1. No second controller is required. Leave **Use virtual Player 2 keyboard** enabled for the default test. If testing hardware instead, disable it and configure controller 2 before starting the game.
 2. Load Alucard into an ordinary room with a flat floor, wall, and normal exit.
 3. Open the mod settings and click **Reset diagnostic**.
-4. Close the settings and wait two frames so virtual input leaves UI suppression.
+4. Close the entire Mods window and wait two frames so virtual input leaves UI suppression. Keyboard controls are intentionally neutral while any ImGui interface owns keyboard input.
 5. In virtual mode, press and release `I`, `L`, `K`, `J`, `U`, `O`, and `P`. These inject Up, Right, Down, Left, Cross, Circle, and Start respectively into SOTN controller port 2.
 6. Use `J`/`L` to move the cyan proxy and `U` to jump. These keys should not be bound to Player 1.
 7. In physical mode, press the equivalent controller buttons, enable **Require analog test**, and move both sticks through their full ranges.
@@ -67,7 +67,7 @@ The settings panel reports which required controls have reached each stage relev
 Example:
 
 ```text
-P2D1 V=0.1.1 H=P:900/880/860/860/2700 I=P:K:-/7/7/7/A- K=7/7/H0000/N1 M=P:18/24/1 R=P:600/610/1 C=P:4512/0/0/350/4/1/B11 T=P:1/1/3 S=P:17/6/860 G=OK:E1S1P1 Q=1/1/1/0 E=0
+P2D1 V=0.1.2 H=P:900/880/860/860/2700 I=P:K:-/7/7/7/A- K=7/7/H0000/N1 M=P:18/24/1 R=P:600/610/1/D900/H00 C=P:4512/0/0/350/4/1/B11 T=P:1/1/3 S=P:17/6/860 G=OK:E1S1P1 Q=1/1/1/0 E=0
 ```
 
 | Field | Meaning |
@@ -76,7 +76,7 @@ P2D1 V=0.1.1 H=P:900/880/860/860/2700 I=P:K:-/7/7/7/A- K=7/7/H0000/N1 M=P:18/24/
 | `I` | Input result and source: `K` virtual keyboard or `C` configured controller, followed by host/pad/game/tapped stages and analog-axis count. |
 | `K` | Virtual key-down/key-up counts, current held mask, and neutral observation. `-` means physical-controller mode. |
 | `M` | Proxy movement result and left/right pixel distance plus jump observation. |
-| `R` | Render result, draw attempts/eligible callbacks, and visual confirmation. |
+| `R` | Direct GP0 draws/eligible callbacks, visual confirmation, `DrawOTag` callbacks, and HLE active/ready bits. GP0 drawing also works when both HLE bits are zero. |
 | `C` | Collision result, calls/restoration failures/invalid corrections/ground/wall/ceiling contacts plus solid/empty observation bits. |
 | `T` | Transition result and passed/completed/layer-event counts. |
 | `S` | Player-effect slot pressure result, minimum free slots/minimum longest free run/sample count. |
@@ -91,7 +91,7 @@ Pass thresholds are deliberately conservative:
 - `H` needs at least 60 callbacks from each required hook/event.
 - `I` in virtual mode needs all seven key-downs/key-ups plus all seven buttons at pad/game/tapped stages. Physical mode needs all seven buttons at all four stages and, when selected, all four analog axes.
 - `M` needs at least eight commanded pixels in both horizontal directions and a measured four-pixel jump rise.
-- `R` needs at least 60 draw attempts plus the tester's visual confirmation.
+- `R` needs at least 60 direct GP0 draws plus the tester's visual confirmation.
 - `C` needs at least 120 calls, intact scratch restoration, solid and empty samples, and observed ground, wall, and ceiling contacts.
 - `T` needs a changed stable room identity and post-transition Player 2 movement for every counted transition.
 - `S` needs at least five samples, at least four free attack/effect slots, and a contiguous run of at least two.
@@ -108,6 +108,7 @@ Pass thresholds are deliberately conservative:
 - Virtual controls mutate only the active-low `PadReadEvent` for runtime port `1`, which is SOTN controller port 2. Port 0 and Player 1 input are not modified.
 - Virtual mode replaces incoming Pad 2 state rather than merging with configured hardware, so its report cannot pass using a physical controller accidentally.
 - Opening the settings panel, loading, entering menus, or entering cutscenes releases and suppresses virtual input. **Release virtual keys** provides a manual recovery action.
+- The proxy marker is emitted directly through normal PSX GP0 rectangle commands after the stage ordering table, so it works with both HLE and software GPU rendering.
 
 These checks reduce risk on the exact supported release but cannot prove compatibility with modified executables or future SymphonyRecomp versions. The collision model is intentionally incomplete. A pass establishes that a controlled, rendered, terrain-aware proxy can be maintained; it does not establish full Alucard physics, combat, enemy targeting, moving platforms, elevators, transformations, spells, familiars, or completed co-op.
 
@@ -123,6 +124,13 @@ These checks reduce risk on the exact supported release but cannot prove compati
 - Virtual keyboard injection validates SymphonyRecomp's BIOS packed-pad path; it does not claim to test every possible direct-buffer controller API.
 
 ## Version History
+
+### 0.1.2
+
+- Polls virtual keys once per VSync instead of depending on accepted keyboard events.
+- Replaces the HLE-only `GpuPrims` marker with backend-independent PSX GP0 rectangles.
+- Reports stage ordering-table calls and HLE backend state.
+- Clarifies that the entire Mods window must be closed while testing virtual keys.
 
 ### 0.1.1
 
@@ -161,7 +169,7 @@ Each phase depends on runtime test results from the previous phase.
 
 ## Development
 
-The implementation hooks `dra/RunMainEngine`, `dra/UpdatePlayerEntities`, and `dra/RenderEntities`; observes `VSyncEvent`, `PadReadEvent`, `PlayerLoadedEvent`, and `RoomLayerLoadEvent`; calls SOTN's generic collision API through `0x8003C7BC`; and renders through `GpuPrims`.
+The implementation hooks `dra/RunMainEngine`, `dra/UpdatePlayerEntities`, `dra/RenderEntities`, and `main/DrawOTag`; observes `VSyncEvent`, `PadReadEvent`, `PlayerLoadedEvent`, and `RoomLayerLoadEvent`; calls SOTN's generic collision API through `0x8003C7BC`; and renders backend-independent GP0 rectangles after the stage ordering table.
 
 The source is dynamically compile-checked against the exact SymphonyRecomp `v0.4.3b` APIs and the current local development runtime using .NET 10. Gameplay validation still requires SymphonyRecomp and a legally owned US game copy.
 

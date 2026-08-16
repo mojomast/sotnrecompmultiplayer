@@ -16,7 +16,7 @@ namespace CoopFeasibilityMod;
 
 public sealed class CoopFeasibility : IMod
 {
-    private const string Version = "0.1.1";
+    private const string Version = "0.1.2";
     private const uint ExpectedCollisionFunction = 0x800EF45C;
 
     private const uint GameStepAddress = 0x80073060;
@@ -38,8 +38,6 @@ public sealed class CoopFeasibility : IMod
     private const uint BackbufferXAddress = 0x8006C39C;
     private const uint BackbufferYAddress = 0x8006C3A0;
     private const uint OrderingTableOffset = 0x474;
-    private const int OrderingTableSize = 0x200;
-    private const int ForegroundOrder = 0;
 
     private const int FixedOne = 0x10000;
     private const int RunSpeed = 0x18000;
@@ -104,6 +102,7 @@ public sealed class CoopFeasibility : IMod
     private byte _rightYMin = 0xFF;
     private byte _rightYMax;
     private ushort _virtualPressed;
+    private ushort _virtualPreviousHeld;
     private ushort _virtualDownSeen;
     private ushort _virtualUpSeen;
     private bool _virtualNeutralSeen;
@@ -128,6 +127,7 @@ public sealed class CoopFeasibility : IMod
 
     private long _renderEligible;
     private long _renderSubmitted;
+    private long _drawOtCalls;
     private long _collisionCalls;
     private int _collisionRestoreFailures;
     private int _invalidCorrections;
@@ -166,7 +166,6 @@ public sealed class CoopFeasibility : IMod
     public void OnLoad()
     {
         _instance = this;
-        Event.AddListener<KeyboardEvent>(OnKeyboard);
         Event.AddListener<VSyncEvent>(OnVSync);
         Event.AddListener<PadReadEvent>(OnPadRead);
         Event.AddListener<PlayerLoadedEvent>(OnPlayerLoaded);
@@ -178,7 +177,6 @@ public sealed class CoopFeasibility : IMod
     {
         if (ReferenceEquals(_instance, this)) _instance = null;
         _virtualPressed = 0;
-        Event.RemoveListener<KeyboardEvent>(OnKeyboard);
         Event.RemoveListener<VSyncEvent>(OnVSync);
         Event.RemoveListener<PadReadEvent>(OnPadRead);
         Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
@@ -227,7 +225,7 @@ public sealed class CoopFeasibility : IMod
 
         ImGui.Separator();
         ImGui.TextWrapped(_virtualKeyboard
-            ? "Virtual Pad 2: I/J/K/L = Up/Left/Down/Right, U = Cross/jump, O = Circle, P = Start. Input is injected only into SOTN controller port 2."
+            ? "Virtual Pad 2: I/J/K/L = Up/Left/Down/Right, U = Cross/jump, O = Circle, P = Start. Close the Mods window before using these keys."
             : "Physical Pad 2: release all buttons, then press and release Up, Right, Down, Left, Cross, Circle, and Start. Move both analog sticks.");
         ImGui.Text($"Safe state: {(_safeFrame ? "yes" : "no")} | {_safeReason}");
         ImGui.Text($"Operation: {_operationStatus}");
@@ -251,7 +249,7 @@ public sealed class CoopFeasibility : IMod
         ImGui.Text($"Proxy: {(_proxyInitialized ? "active" : "waiting")} | world {_proxyX >> 16}, {_proxyY >> 16} | velocity {_velocityX / 65536f:F2}, {_velocityY / 65536f:F2}");
         ImGui.Text($"Grounded: {_grounded} | collision this frame: {_collisionThisFrame} | moved L/R: {_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16} | jumped: {_jumpObserved}");
         ImGui.Text($"Collision API: 0x{_collisionFunction:X8} | calls: {_collisionCalls} | restore failures: {_collisionRestoreFailures} | rejected corrections: {_invalidCorrections}");
-        ImGui.Text($"Rendering attempts/eligible: {_renderSubmitted}/{_renderEligible} | callbacks: {_renderCalls}");
+        ImGui.Text($"GP0 draws/eligible/DrawOTag: {_renderSubmitted}/{_renderEligible}/{_drawOtCalls} | HLE active/ready: {GpuHle.Active}/{GpuHle.Backend?.Ready == true}");
         ImGui.Text($"Collision contacts ground/wall/ceiling/one-way: {_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/{_oneWayContacts}");
         ImGui.Text($"Transitions passed/completed/layer events/post-move: {_passedTransitions}/{_completedTransitions}/{_roomLayerEvents}/{_postTransitionMoved}");
         ImGui.Text($"Free slots player/attack/stage/tail: {_freePlayerCurrent}/{_freeAttackCurrent}/{_freeStageCurrent}/{_freeTailCurrent}");
@@ -263,35 +261,6 @@ public sealed class CoopFeasibility : IMod
         if (_fatal) ImGui.TextWrapped($"First error: {_firstError}");
         else if (_collisionDisabled) ImGui.TextWrapped($"Collision disabled: {_collisionFailureReason}");
         ImGui.TextDisabled("The proxy uses no SOTN entity slot and does not modify saves, progression, Player 1, or enemies.");
-    }
-
-    private void OnKeyboard(KeyboardEvent e)
-    {
-        if (!_virtualKeyboard) return;
-        try
-        {
-            ushort mask = VirtualButtonFor((Key)e.Key);
-            if (mask == 0) return;
-            if (_virtualSuppressionFrames > 0 || HostUiCapturesKeyboard())
-            {
-                if (!e.Pressed) _virtualPressed &= (ushort)~mask;
-                return;
-            }
-            if (e.Pressed)
-            {
-                _virtualDownSeen |= mask;
-                if (_virtualNeutralSeen) _virtualPressed |= mask;
-            }
-            else
-            {
-                _virtualUpSeen |= mask;
-                _virtualPressed &= (ushort)~mask;
-            }
-        }
-        catch (Exception ex)
-        {
-            Fail("Keyboard event", ex);
-        }
     }
 
     private void OnVSync(VSyncEvent e)
@@ -438,12 +407,27 @@ public sealed class CoopFeasibility : IMod
         try
         {
             mod._renderCalls++;
-            if (mod._fatal) return;
-            mod.RenderProxy(memory);
         }
         catch (Exception ex)
         {
             mod.Fail("RenderEntities hook", ex);
+        }
+    }
+
+    [PostHook("main", "DrawOTag")]
+    private static void AfterDrawOrderingTable(CpuContext context, IMemory memory)
+    {
+        CoopFeasibility? mod = _instance;
+        if (mod == null) return;
+        try
+        {
+            mod._drawOtCalls++;
+            if (mod._fatal) return;
+            mod.DrawProxyGp0(context, memory);
+        }
+        catch (Exception ex)
+        {
+            mod.Fail("DrawOTag hook", ex);
         }
     }
 
@@ -714,48 +698,66 @@ public sealed class CoopFeasibility : IMod
         return true;
     }
 
-    private void RenderProxy(IMemory memory)
+    private void DrawProxyGp0(CpuContext context, IMemory memory)
     {
         if (!_enabled || !_safeFrame || !_proxyInitialized || !Game.Available || !Game.InGame || Game.IsLoading ||
             Game.MenuOpen || Game.MapOpen || !DisplayModeHooks.IsStage)
             return;
-        _renderEligible++;
 
         uint currentBuffer = memory.ReadU32(CurrentBufferPointer);
         if (currentBuffer == 0) return;
+        uint expectedOt = (currentBuffer + OrderingTableOffset) & 0x1FFFFC;
+        if ((context.A0 & 0x1FFFFC) != expectedOt) return;
+        _renderEligible++;
+
+        var gpu = RecompOne.Runtime.Runtime.Gpu;
+        if (gpu == null) return;
 
         int scrollX = unchecked((int)memory.ReadU32(ScrollXAddress)) >> 16;
         int scrollY = unchecked((int)memory.ReadU32(ScrollYAddress)) >> 16;
-        float x = unchecked((int)memory.ReadU32(BackbufferXAddress)) + (_proxyX >> 16) - scrollX;
-        float y = unchecked((int)memory.ReadU32(BackbufferYAddress)) + (_proxyY >> 16) - scrollY;
+        int x = unchecked((int)memory.ReadU32(BackbufferXAddress)) + (_proxyX >> 16) - scrollX;
+        int y = unchecked((int)memory.ReadU32(BackbufferYAddress)) + (_proxyY >> 16) - scrollY;
         if (x < -32 || x > 288 || y < -48 || y > 288) return;
 
-        GpuPrims.SetOrderingTable(currentBuffer + OrderingTableOffset, OrderingTableSize);
+        if (!WriteStageDrawEnvironment(gpu, memory, currentBuffer)) return;
+        DrawGpuTile(gpu, x - HalfWidth - 1, y + HeadOffset - 1, HalfWidth * 2 + 2,
+            FootOffset - HeadOffset + 2, 0, 0, 0);
+
         byte r = _collisionThisFrame ? (byte)255 : (byte)32;
         byte g = _grounded ? (byte)255 : (byte)192;
-        byte b = 255;
-
-        DrawQuad(x - HalfWidth, y + HeadOffset, x + HalfWidth, y + FootOffset, r, g, b, true);
-        DrawQuad(x - HalfWidth, y + HeadOffset, x + HalfWidth, y + HeadOffset + 1, 0, 0, 0);
-        DrawQuad(x - HalfWidth, y + FootOffset - 1, x + HalfWidth, y + FootOffset, 0, 0, 0);
-        DrawQuad(x - HalfWidth, y + HeadOffset, x - HalfWidth + 1, y + FootOffset, 0, 0, 0);
-        DrawQuad(x + HalfWidth - 1, y + HeadOffset, x + HalfWidth, y + FootOffset, 0, 0, 0);
-
-        float direction = _facingLeft ? -1f : 1f;
-        var tip = new PrimVertex(x + direction * 11f, y - 4f, 255, 232, 32);
-        var upper = new PrimVertex(x + direction * 5f, y - 7f, 255, 232, 32);
-        var lower = new PrimVertex(x + direction * 5f, y - 1f, 255, 232, 32);
-        GpuPrims.Tri(ForegroundOrder, tip, upper, lower);
+        DrawGpuTile(gpu, x - HalfWidth, y + HeadOffset, HalfWidth * 2,
+            FootOffset - HeadOffset, r, g, 255);
+        DrawGpuTile(gpu, x + (_facingLeft ? -5 : 2), y - 6, 3, 3, 255, 232, 32);
         _renderSubmitted++;
     }
 
-    private static void DrawQuad(float left, float top, float right, float bottom, byte r, byte g, byte b, bool transparent = false)
+    private static bool WriteStageDrawEnvironment(RecompOne.Runtime.Gpu gpu, IMemory memory, uint buffer)
     {
-        var a = new PrimVertex(left, top, r, g, b);
-        var b0 = new PrimVertex(right, top, r, g, b);
-        var c = new PrimVertex(left, bottom, r, g, b);
-        var d = new PrimVertex(right, bottom, r, g, b);
-        GpuPrims.Quad(ForegroundOrder, a, b0, c, d, semiTrans: transparent, blend: 1, gouraud: true);
+        int clipX = (short)memory.ReadU16(buffer + 0x04);
+        int clipY = (short)memory.ReadU16(buffer + 0x06);
+        int clipW = (short)memory.ReadU16(buffer + 0x08);
+        int clipH = (short)memory.ReadU16(buffer + 0x0A);
+        int offsetX = (short)memory.ReadU16(buffer + 0x0C);
+        int offsetY = (short)memory.ReadU16(buffer + 0x0E);
+        if (clipW <= 0 || clipH <= 0) return false;
+
+        gpu.WriteGp0(0xE3000000u |
+            (((uint)clipY & 0x3FF) << 10) | ((uint)clipX & 0x3FF));
+        gpu.WriteGp0(0xE4000000u |
+            (((uint)(clipY + clipH - 1) & 0x3FF) << 10) |
+            ((uint)(clipX + clipW - 1) & 0x3FF));
+        gpu.WriteGp0(0xE5000000u |
+            (((uint)offsetY & 0x7FF) << 11) | ((uint)offsetX & 0x7FF));
+        gpu.WriteGp0(0xE6000000u);
+        return true;
+    }
+
+    private static void DrawGpuTile(RecompOne.Runtime.Gpu gpu, int x, int y, int width, int height,
+        byte r, byte g, byte b)
+    {
+        gpu.WriteGp0(0x60000000u | ((uint)b << 16) | ((uint)g << 8) | r);
+        gpu.WriteGp0((((uint)y & 0x7FF) << 16) | ((uint)x & 0x7FF));
+        gpu.WriteGp0(((uint)height << 16) | (uint)width);
     }
 
     private bool TryGetSafeState(IMemory memory, out string reason)
@@ -899,6 +901,7 @@ public sealed class CoopFeasibility : IMod
         _gamePressed = _gameTapped = 0;
         _neutralSeen = false;
         _virtualPressed = 0;
+        _virtualPreviousHeld = ReadVirtualKeysDown();
         _virtualDownSeen = _virtualUpSeen = 0;
         _virtualNeutralSeen = false;
         _virtualNeutralObserved = false;
@@ -920,7 +923,7 @@ public sealed class CoopFeasibility : IMod
         _groundContacts = _wallCorrections = _ceilingCorrections = _oneWayContacts = 0;
         _collisionFunction = 0;
         _sawSolid = _sawEmpty = false;
-        _renderEligible = _renderSubmitted = 0;
+        _renderEligible = _renderSubmitted = _drawOtCalls = 0;
         _roomKnown = false;
         _roomStableFrames = 0;
         _transitionPending = false;
@@ -977,7 +980,7 @@ public sealed class CoopFeasibility : IMod
 
         return $"P2D1 V={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
                $"M={movement}:{_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16}/{Bool(_jumpObserved)} " +
-               $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)} " +
+               $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)}/D{_drawOtCalls}/H{Bool(GpuHle.Active)}{Bool(GpuHle.Backend?.Ready == true)} " +
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents} " +
                $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
@@ -1029,18 +1032,6 @@ public sealed class CoopFeasibility : IMod
         return count;
     }
 
-    private static ushort VirtualButtonFor(Key key) => key switch
-    {
-        Key.I => (ushort)GameButton.Up,
-        Key.L => (ushort)GameButton.Right,
-        Key.K => (ushort)GameButton.Down,
-        Key.J => (ushort)GameButton.Left,
-        Key.U => (ushort)GameButton.Cross,
-        Key.O => (ushort)GameButton.Circle,
-        Key.P => (ushort)GameButton.Start,
-        _ => 0,
-    };
-
     private static ushort ReadVirtualKeysDown()
     {
         ushort held = 0;
@@ -1062,17 +1053,22 @@ public sealed class CoopFeasibility : IMod
             if (_virtualPressed != 0) _virtualForcedReleases++;
             _virtualPressed = 0;
             _virtualNeutralSeen = held == 0;
+            _virtualPreviousHeld = held;
             return;
         }
 
-        if (held == 0)
+        if (!_virtualNeutralSeen)
         {
-            if (_virtualPressed != 0) _virtualForcedReleases++;
             _virtualPressed = 0;
-            _virtualNeutralSeen = true;
+            if (held == 0) _virtualNeutralSeen = true;
+            _virtualPreviousHeld = held;
+            return;
         }
-        else if (_virtualNeutralSeen) _virtualPressed = held;
-        else _virtualPressed = 0;
+
+        _virtualDownSeen |= (ushort)(held & ~_virtualPreviousHeld);
+        _virtualUpSeen |= (ushort)(_virtualPreviousHeld & ~held);
+        _virtualPressed = held;
+        _virtualPreviousHeld = held;
     }
 
     private bool VirtualInputAllowed(IMemory memory) =>
@@ -1099,6 +1095,7 @@ public sealed class CoopFeasibility : IMod
     {
         if (_virtualPressed != 0) _virtualForcedReleases++;
         _virtualPressed = 0;
+        _virtualPreviousHeld = ReadVirtualKeysDown();
         _virtualNeutralSeen = false;
     }
 
@@ -1153,6 +1150,7 @@ public sealed class CoopFeasibility : IMod
         _hostSeen = _padSeen = _gameSeen = _tapSeen = 0;
         _neutralSeen = false;
         _virtualDownSeen = _virtualUpSeen = 0;
+        _virtualPreviousHeld = ReadVirtualKeysDown();
         _virtualNeutralSeen = false;
         _virtualNeutralObserved = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
