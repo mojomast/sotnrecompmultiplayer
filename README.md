@@ -4,7 +4,7 @@ An experimental [SymphonyRecomp](https://github.com/BlackLabelHQ/SymphonyRecomp)
 
 ## Project Status
 
-This repository is at the Player 2 feasibility stage. Version `0.1.0` provides a diagnostic proxy that tests the engine paths needed before local or networked co-op can be implemented safely.
+This repository is at the Player 2 feasibility stage. Version `0.1.1` provides a diagnostic proxy that tests the engine paths needed before local or networked co-op can be implemented safely.
 
 This is not a complete co-op mod. It tests the plumbing needed before one can be built:
 
@@ -35,24 +35,24 @@ Use a legally owned US PlayStation copy of Castlevania: Symphony of the Night. O
    ```
 
 3. Start SymphonyRecomp and enable **Co-op Feasibility Probe** in the mods menu.
-4. Configure **Pad 2** in SymphonyRecomp's input settings.
+4. Configure **Pad 2** in SymphonyRecomp's input settings only when testing a physical controller.
 5. Load an Alucard save in a normal castle room.
 
 SymphonyRecomp compiles the C# files under `source/` at runtime.
 
-When updating, run `git pull`, restart or reload the mod, and confirm `Co-op Feasibility Probe v0.1.0` appears in its settings panel.
+When updating, run `git pull`, restart or reload the mod, and confirm `Co-op Feasibility Probe v0.1.1` appears in its settings panel.
 
 ## Test Procedure
 
 Use only this diagnostic mod for the first test when possible.
 
-1. Connect and configure controller 2 before starting the game.
+1. No second controller is required. Leave **Use virtual Player 2 keyboard** enabled for the default test. If testing hardware instead, disable it and configure controller 2 before starting the game.
 2. Load Alucard into an ordinary room with a flat floor, wall, and normal exit.
 3. Open the mod settings and click **Reset diagnostic**.
-4. Close the settings and release every controller 2 button once.
-5. Press and release `Up`, `Right`, `Down`, `Left`, `Cross`, `Circle`, and `Start` on controller 2.
-6. If using a physical controller 2, enable **Require analog test** and move both analog sticks through their full ranges. Leave it disabled for Player 2 keyboard bindings.
-7. Use controller 2 Left/Right to move the cyan proxy. Use `Cross` to jump.
+4. Close the settings and wait two frames so virtual input leaves UI suppression.
+5. In virtual mode, press and release `I`, `L`, `K`, `J`, `U`, `O`, and `P`. These inject Up, Right, Down, Left, Cross, Circle, and Start respectively into SOTN controller port 2.
+6. Use `J`/`L` to move the cyan proxy and `U` to jump. These keys should not be bound to Player 1.
+7. In physical mode, press the equivalent controller buttons, enable **Require analog test**, and move both sticks through their full ranges.
 8. Test the proxy against a floor and wall, then jump into a reachable ceiling. Test a one-way platform if available. `C` remains waiting until floor, wall, and ceiling behavior have all been observed.
 9. Use Player 1 to cross a normal room boundary. Move the proxy again after the next room settles.
 10. Spend at least ten seconds in both a quiet room and an enemy/effect-heavy room.
@@ -60,25 +60,28 @@ Use only this diagnostic mod for the first test when possible.
 12. Click **Copy report** and paste the single `P2D1 ...` line back to the developer. **Print report to console** is available as a fallback; use SymphonyRecomp's Console panel or the terminal that launched it.
 13. Also paste any **First error** or **Collision disabled** line shown in the panel and describe any visual or collision anomaly.
 
-The settings panel reports which required controller buttons have not yet reached the host, pad-event, processed-game, and tapped-game stages.
+The settings panel reports which required controls have reached each stage relevant to the selected physical or virtual input mode.
 
 ## Report Fields
 
 Example:
 
 ```text
-P2D1 V=0.1.0 H=P:900/880/860/860/900 I=P:7/7/7/7/A4 M=P:18/24/1 R=P:600/610/1 C=P:4512/0/0/350/4/1/B11 T=P:1/1/3 S=P:17/6/860 E=0
+P2D1 V=0.1.1 H=P:900/880/860/860/2700 I=P:K:-/7/7/7/A- K=7/7/H0000/N1 M=P:18/24/1 R=P:600/610/1 C=P:4512/0/0/350/4/1/B11 T=P:1/1/3 S=P:17/6/860 G=OK:E1S1P1 Q=1/1/1/0 E=0
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `H` | Hook result and VSync/engine/player-update/render/port-2-pad callback counts. |
-| `I` | Required buttons observed at host/pad/game/tapped stages plus active analog-axis count. |
+| `I` | Input result and source: `K` virtual keyboard or `C` configured controller, followed by host/pad/game/tapped stages and analog-axis count. |
+| `K` | Virtual key-down/key-up counts, current held mask, and neutral observation. `-` means physical-controller mode. |
 | `M` | Proxy movement result and left/right pixel distance plus jump observation. |
 | `R` | Render result, draw attempts/eligible callbacks, and visual confirmation. |
 | `C` | Collision result, calls/restoration failures/invalid corrections/ground/wall/ceiling contacts plus solid/empty observation bits. |
 | `T` | Transition result and passed/completed/layer-event counts. |
 | `S` | Player-effect slot pressure result, minimum free slots/minimum longest free run/sample count. |
+| `G` | Safety-gate code plus enabled/safe/proxy-initialized bits. This identifies why active tests have not started. |
+| `Q` | Diagnostic generation, proxy reset requests, completed resets, and pending-reset bit. |
 | `E` | `0` for none, `A` for API mismatch, `C` for rejected collision data, or `X` for a caught exception. |
 
 `P` means pass, `W` means waiting or warning, and `F` means failure.
@@ -86,7 +89,7 @@ P2D1 V=0.1.0 H=P:900/880/860/860/900 I=P:7/7/7/7/A4 M=P:18/24/1 R=P:600/610/1 C=
 Pass thresholds are deliberately conservative:
 
 - `H` needs at least 60 callbacks from each required hook/event.
-- `I` needs all seven buttons at all four input stages; physical-controller mode also needs movement on all four analog axes.
+- `I` in virtual mode needs all seven key-downs/key-ups plus all seven buttons at pad/game/tapped stages. Physical mode needs all seven buttons at all four stages and, when selected, all four analog axes.
 - `M` needs at least eight commanded pixels in both horizontal directions and a measured four-pixel jump rise.
 - `R` needs at least 60 draw attempts plus the tester's visual confirmation.
 - `C` needs at least 120 calls, intact scratch restoration, solid and empty samples, and observed ground, wall, and ceiling contacts.
@@ -102,6 +105,9 @@ Pass thresholds are deliberately conservative:
 - Entity capacity is read only.
 - Menus, maps, cutscenes, loading, special transitions, unsupported characters, and invalid tilemaps suspend the proxy.
 - Hook exceptions stop active probing and are retained in the settings panel instead of being retried every frame.
+- Virtual controls mutate only the active-low `PadReadEvent` for runtime port `1`, which is SOTN controller port 2. Port 0 and Player 1 input are not modified.
+- Virtual mode replaces incoming Pad 2 state rather than merging with configured hardware, so its report cannot pass using a physical controller accidentally.
+- Opening the settings panel, loading, entering menus, or entering cutscenes releases and suppresses virtual input. **Release virtual keys** provides a manual recovery action.
 
 These checks reduce risk on the exact supported release but cannot prove compatibility with modified executables or future SymphonyRecomp versions. The collision model is intentionally incomplete. A pass establishes that a controlled, rendered, terrain-aware proxy can be maintained; it does not establish full Alucard physics, combat, enemy targeting, moving platforms, elevators, transformations, spells, familiars, or completed co-op.
 
@@ -114,6 +120,20 @@ These checks reduce risk on the exact supported release but cannot prove compati
 - No Player 2 HP, combat, inventory, menu, revive, or persistence exists yet.
 - A configured Player 2 keyboard mapping can make `Connected2` true without a physical second controller.
 - Hot-plugging can change controller assignment.
+- Virtual keyboard injection validates SymphonyRecomp's BIOS packed-pad path; it does not claim to test every possible direct-buffer controller API.
+
+## Version History
+
+### 0.1.1
+
+- Adds a virtual Player 2 keyboard using `I/J/K/L`, `U`, `O`, and `P`.
+- Injects those controls into SOTN controller port 2 before the game creates `Pressed2` and `Tapped2`.
+- Removes an invalid player-entity update-pointer gate that prevented native Alucard gameplay from ever reaching a safe diagnostic frame.
+- Adds safety-gate and proxy-reset state to the pasteable report.
+
+### 0.1.0
+
+- Initial physical-controller feasibility probe.
 
 ## Architecture Direction
 

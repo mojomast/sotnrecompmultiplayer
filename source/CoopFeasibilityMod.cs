@@ -5,21 +5,23 @@ using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Events;
 using RecompOne.Runtime.Hardware;
 using RecompOne.Runtime.Hle;
+using RecompOne.Runtime.Host;
 using RecompOne.Runtime.Memory;
 using RecompOne.Runtime.Modding;
+using Silk.NET.Input;
 using Sotn;
+using GameButton = Sotn.Button;
 
 namespace CoopFeasibilityMod;
 
 public sealed class CoopFeasibility : IMod
 {
-    private const string Version = "0.1.0";
+    private const string Version = "0.1.1";
     private const uint ExpectedCollisionFunction = 0x800EF45C;
 
     private const uint GameStepAddress = 0x80073060;
     private const uint EngineStepAddress = 0x8003C9A4;
     private const uint CutsceneControlAddress = 0x8003C704;
-    private const uint PauseAllowedAddress = 0x8003C8B8;
     private const uint SpecialTransitionAddress = 0x80097C98;
     private const uint RoomLeftAddress = 0x800730B0;
     private const uint RoomTopAddress = 0x800730B4;
@@ -57,18 +59,24 @@ public sealed class CoopFeasibility : IMod
         Controller.Up | Controller.Right | Controller.Down | Controller.Left |
         Controller.Cross | Controller.Circle | Controller.Start;
     private const ushort RequiredGameButtons =
-        (ushort)(Button.Up | Button.Right | Button.Down | Button.Left |
-                 Button.Cross | Button.Circle | Button.Start);
+        (ushort)(GameButton.Up | GameButton.Right | GameButton.Down | GameButton.Left |
+                 GameButton.Cross | GameButton.Circle | GameButton.Start);
 
     private static CoopFeasibility? _instance;
 
     private bool _enabled = true;
+    private bool _virtualKeyboard = true;
     private bool _physicalControllerTest;
     private bool _visualConfirmed;
     private bool _fatal;
     private string _firstError = "none";
     private bool _safeFrame;
+    private string _safeCode = "WAIT";
     private string _safeReason = "Waiting for gameplay";
+    private string _operationStatus = "Waiting for gameplay";
+    private int _diagnosticGeneration;
+    private int _proxyResetRequests;
+    private int _proxyResetCompletions;
 
     private long _vsyncCalls;
     private long _mainEngineCalls;
@@ -95,6 +103,13 @@ public sealed class CoopFeasibility : IMod
     private byte _rightXMax;
     private byte _rightYMin = 0xFF;
     private byte _rightYMax;
+    private ushort _virtualPressed;
+    private ushort _virtualDownSeen;
+    private ushort _virtualUpSeen;
+    private bool _virtualNeutralSeen;
+    private bool _virtualNeutralObserved;
+    private int _virtualSuppressionFrames;
+    private int _virtualForcedReleases;
 
     private bool _proxyInitialized;
     private int _proxyX;
@@ -151,6 +166,7 @@ public sealed class CoopFeasibility : IMod
     public void OnLoad()
     {
         _instance = this;
+        Event.AddListener<KeyboardEvent>(OnKeyboard);
         Event.AddListener<VSyncEvent>(OnVSync);
         Event.AddListener<PadReadEvent>(OnPadRead);
         Event.AddListener<PlayerLoadedEvent>(OnPlayerLoaded);
@@ -161,6 +177,8 @@ public sealed class CoopFeasibility : IMod
     public void OnUnload()
     {
         if (ReferenceEquals(_instance, this)) _instance = null;
+        _virtualPressed = 0;
+        Event.RemoveListener<KeyboardEvent>(OnKeyboard);
         Event.RemoveListener<VSyncEvent>(OnVSync);
         Event.RemoveListener<PadReadEvent>(OnPadRead);
         Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
@@ -170,6 +188,14 @@ public sealed class CoopFeasibility : IMod
 
     public void DrawSettings()
     {
+        if (_virtualKeyboard)
+        {
+            if (_virtualPressed != 0) _virtualForcedReleases++;
+            _virtualPressed = 0;
+            _virtualNeutralSeen = false;
+            _virtualSuppressionFrames = 2;
+        }
+
         ImGui.TextDisabled($"Co-op Feasibility Probe v{Version} | target v0.4.3b");
 
         bool enabled = _enabled;
@@ -178,6 +204,10 @@ public sealed class CoopFeasibility : IMod
             _enabled = enabled;
             _neutralSeen = false;
         }
+
+        bool virtualKeyboard = _virtualKeyboard;
+        if (ImGui.Checkbox("Use virtual Player 2 keyboard", ref virtualKeyboard))
+            SetVirtualKeyboard(virtualKeyboard);
 
         bool visible = _visualConfirmed;
         if (ImGui.Checkbox("I can see the proxy", ref visible)) _visualConfirmed = visible;
@@ -188,19 +218,33 @@ public sealed class CoopFeasibility : IMod
 
         if (ImGui.Button("Reset diagnostic")) ResetDiagnostic();
         ImGui.SameLine();
-        if (ImGui.Button("Reset proxy beside Player 1")) _reinitializeRequested = true;
+        if (ImGui.Button("Reset proxy to Player 1")) QueueProxyReset();
+        ImGui.SameLine();
+        if (ImGui.Button("Release virtual keys")) ReleaseVirtualKeys();
         if (ImGui.Button("Print report to console")) Console.WriteLine($"[CoopProbe] {BuildReport()}");
         ImGui.SameLine();
         if (ImGui.Button("Copy report")) ImGui.SetClipboardText(BuildReport());
 
         ImGui.Separator();
-        ImGui.TextWrapped("Test controller 2: release all buttons, then press and release Up, Right, Down, Left, Cross, Circle, and Start. Move both analog sticks. Left/Right moves the proxy; Cross jumps.");
+        ImGui.TextWrapped(_virtualKeyboard
+            ? "Virtual Pad 2: I/J/K/L = Up/Left/Down/Right, U = Cross/jump, O = Circle, P = Start. Input is injected only into SOTN controller port 2."
+            : "Physical Pad 2: release all buttons, then press and release Up, Right, Down, Left, Cross, Circle, and Start. Move both analog sticks.");
         ImGui.Text($"Safe state: {(_safeFrame ? "yes" : "no")} | {_safeReason}");
-        ImGui.Text($"P2 logical connection: {Controller.Connected2} | changes: {_connectionChanges}");
+        ImGui.Text($"Operation: {_operationStatus}");
+        ImGui.Text($"P2 source: {(_virtualKeyboard ? "virtual keyboard" : "configured Pad 2")} | runtime connection: {Controller.Connected2} | changes: {_connectionChanges}");
         ImGui.Text($"Raw host: 0x{_hostState:X4} | pad event: 0x{_padState:X4}");
+        ImGui.Text($"Virtual held/down/up: 0x{_virtualPressed:X4}/0x{_virtualDownSeen:X4}/0x{_virtualUpSeen:X4} | forced releases: {_virtualForcedReleases}");
         ImGui.Text($"Game pressed: 0x{_gamePressed:X4} | tapped: 0x{_gameTapped:X4}");
-        ImGui.Text($"Required input seen H/P/G/T: {CountSeen(_hostSeen, RequiredHostButtons)}/7, {CountSeen(_padSeen, RequiredGameButtons)}/7, {CountSeen(_gameSeen, RequiredGameButtons)}/7, {CountSeen(_tapSeen, RequiredGameButtons)}/7");
-        ImGui.TextWrapped($"Missing host: {MissingHostButtons()} | missing game taps: {MissingGameButtons(_tapSeen)}");
+        if (_virtualKeyboard)
+        {
+            ImGui.Text($"Required input seen key-down/key-up/pad/game/tap: {CountSeen(_virtualDownSeen, RequiredGameButtons)}/7, {CountSeen(_virtualUpSeen, RequiredGameButtons)}/7, {CountSeen(_padSeen, RequiredGameButtons)}/7, {CountSeen(_gameSeen, RequiredGameButtons)}/7, {CountSeen(_tapSeen, RequiredGameButtons)}/7");
+            ImGui.TextWrapped($"Missing virtual key-down: {MissingGameButtons(_virtualDownSeen)} | missing game taps: {MissingGameButtons(_tapSeen)}");
+        }
+        else
+        {
+            ImGui.Text($"Required input seen host/pad/game/tap: {CountSeen(_hostSeen, RequiredHostButtons)}/7, {CountSeen(_padSeen, RequiredGameButtons)}/7, {CountSeen(_gameSeen, RequiredGameButtons)}/7, {CountSeen(_tapSeen, RequiredGameButtons)}/7");
+            ImGui.TextWrapped($"Missing host: {MissingHostButtons()} | missing game taps: {MissingGameButtons(_tapSeen)}");
+        }
         ImGui.Text($"Left stick X {_leftXMin}-{_leftXMax}, Y {_leftYMin}-{_leftYMax} | Right X {_rightXMin}-{_rightXMax}, Y {_rightYMin}-{_rightYMax}");
 
         ImGui.Separator();
@@ -221,17 +265,49 @@ public sealed class CoopFeasibility : IMod
         ImGui.TextDisabled("The proxy uses no SOTN entity slot and does not modify saves, progression, Player 1, or enemies.");
     }
 
+    private void OnKeyboard(KeyboardEvent e)
+    {
+        if (!_virtualKeyboard) return;
+        try
+        {
+            ushort mask = VirtualButtonFor((Key)e.Key);
+            if (mask == 0) return;
+            if (_virtualSuppressionFrames > 0 || HostUiCapturesKeyboard())
+            {
+                if (!e.Pressed) _virtualPressed &= (ushort)~mask;
+                return;
+            }
+            if (e.Pressed)
+            {
+                _virtualDownSeen |= mask;
+                if (_virtualNeutralSeen) _virtualPressed |= mask;
+            }
+            else
+            {
+                _virtualUpSeen |= mask;
+                _virtualPressed &= (ushort)~mask;
+            }
+        }
+        catch (Exception ex)
+        {
+            Fail("Keyboard event", ex);
+        }
+    }
+
     private void OnVSync(VSyncEvent e)
     {
         try
         {
             _vsyncCalls++;
-            if (Controller.Connected2 != _previousConnected)
+            if (!_virtualKeyboard && Controller.Connected2 != _previousConnected)
             {
                 _previousConnected = Controller.Connected2;
                 _connectionChanges++;
                 ClearInputObservations();
             }
+
+            if (_virtualKeyboard) ReconcileVirtualKeys();
+            if (_virtualSuppressionFrames > 0) _virtualSuppressionFrames--;
 
             _hostState = Controller.State2;
             ushort pressed = (ushort)~_hostState;
@@ -255,8 +331,24 @@ public sealed class CoopFeasibility : IMod
         try
         {
             _pad2Reads++;
+            if (_virtualKeyboard)
+            {
+                if (VirtualInputAllowed(e.Memory)) e.Buttons = (ushort)~_virtualPressed;
+                else
+                {
+                    if (_virtualPressed != 0) _virtualForcedReleases++;
+                    _virtualPressed = 0;
+                    _virtualNeutralSeen = false;
+                    e.Buttons = 0xFFFF;
+                }
+            }
             _padState = e.Buttons;
             _padSeen |= (ushort)~e.Buttons;
+            if (_virtualKeyboard && _virtualPressed == 0 && e.Buttons == 0xFFFF && ReadVirtualKeysDown() == 0)
+            {
+                _virtualNeutralSeen = true;
+                _virtualNeutralObserved = true;
+            }
         }
         catch (Exception ex)
         {
@@ -268,6 +360,7 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
+            ReleaseVirtualKeys();
             _proxyInitialized = false;
             _roomKnown = false;
             _transitionPending = false;
@@ -286,6 +379,7 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
+            ReleaseVirtualKeys();
             _roomLayerEvents++;
             BeginTransition();
             _proxyInitialized = false;
@@ -361,16 +455,28 @@ public sealed class CoopFeasibility : IMod
         if (_collisionDisabled)
         {
             _safeFrame = false;
+            if (_collisionFunction == ExpectedCollisionFunction) _safeCode = "COL";
             _safeReason = _collisionFailureReason;
         }
         if (!_enabled || !_safeFrame)
+        {
+            if (_reinitializeRequested)
+                _operationStatus = $"Proxy reset blocked: {_safeReason}";
             return;
+        }
 
         UpdateRoomIdentity(memory);
         if (_reinitializeRequested || !_proxyInitialized)
         {
+            bool requested = _reinitializeRequested;
             InitializeProxy(memory);
             _reinitializeRequested = false;
+            if (requested)
+            {
+                _proxyResetCompletions++;
+                _operationStatus = "Proxy reset completed at Player 1";
+            }
+            else _operationStatus = "Proxy initialized at Player 1";
         }
 
         _collisionThisFrame = false;
@@ -378,22 +484,24 @@ public sealed class CoopFeasibility : IMod
 
         _gamePressed = Game.Pressed2;
         _gameTapped = Game.Tapped2;
-        bool canControl = Controller.Connected2 && _neutralSeen;
+        bool sourceAvailable = _virtualKeyboard || Controller.Connected2;
+        bool sourceNeutral = _virtualKeyboard ? _virtualNeutralSeen : _neutralSeen;
+        bool canControl = sourceAvailable && sourceNeutral;
         int beforeX = _proxyX;
         bool commandedLeft = false;
         bool commandedRight = false;
 
         if (canControl)
         {
-            bool left = IsGamePressed(Button.Left);
-            bool right = IsGamePressed(Button.Right);
+            bool left = IsGamePressed(GameButton.Left);
+            bool right = IsGamePressed(GameButton.Right);
             commandedLeft = left && !right;
             commandedRight = right && !left;
             _velocityX = left == right ? 0 : left ? -RunSpeed : RunSpeed;
             if (_velocityX < 0) _facingLeft = true;
             else if (_velocityX > 0) _facingLeft = false;
 
-            if ((_gameTapped & (ushort)Button.Cross) != 0 && _grounded)
+            if ((_gameTapped & (ushort)GameButton.Cross) != 0 && _grounded)
             {
                 _velocityY = JumpSpeed;
                 _grounded = false;
@@ -652,39 +760,39 @@ public sealed class CoopFeasibility : IMod
 
     private bool TryGetSafeState(IMemory memory, out string reason)
     {
+        _safeCode = "OK";
         reason = "Ready";
-        if (!Game.Available || !Game.InGame) return Unsafe("Not in gameplay", out reason);
-        if (!Game.InAlucardMode()) return Unsafe("Unsupported character or prologue", out reason);
-        if (Game.IsLoading) return Unsafe("Game is loading", out reason);
-        if (memory.ReadU32(GameStepAddress) != (uint)PlayStep.Default) return Unsafe("Play step is not normal", out reason);
-        if (memory.ReadU32(EngineStepAddress) != 1) return Unsafe("Engine step is not normal", out reason);
-        if (Game.MenuOpen || Game.MapOpen) return Unsafe("Menu or map is open", out reason);
-        if (!DisplayModeHooks.IsStage) return Unsafe("Display is not in stage mode", out reason);
-        if (memory.ReadU32(CutsceneControlAddress) != 0) return Unsafe("Cutscene owns player control", out reason);
-        if (memory.ReadU32(SpecialTransitionAddress) != 0) return Unsafe("Special transition is active", out reason);
-        if (memory.ReadU32(PauseAllowedAddress) == 0 || !Player.HasControl) return Unsafe("Player control is unavailable", out reason);
-        if (memory.ReadU32(Game.EntitiesAddr + 0x28) == 0) return Unsafe("Player entity is unavailable", out reason);
+        if (!Game.Available || !Game.InGame) return Unsafe("GAME", "Not in gameplay", out reason);
+        if (!Game.InAlucardMode()) return Unsafe("CHAR", "Unsupported character or prologue", out reason);
+        if (Game.IsLoading) return Unsafe("LOAD", "Game is loading", out reason);
+        if (memory.ReadU32(GameStepAddress) != (uint)PlayStep.Default) return Unsafe("STEP", "Play step is not normal", out reason);
+        if (memory.ReadU32(EngineStepAddress) != 1) return Unsafe("ENG", "Engine step is not normal", out reason);
+        if (Game.MenuOpen || Game.MapOpen) return Unsafe("MENU", "Menu or map is open", out reason);
+        if (!DisplayModeHooks.IsStage) return Unsafe("DISP", "Display is not in stage mode", out reason);
+        if (memory.ReadU32(CutsceneControlAddress) != 0) return Unsafe("CUT", "Cutscene owns player control", out reason);
+        if (IsSpecialTransition(memory.ReadU32(SpecialTransitionAddress))) return Unsafe("TRANS", "Special transition is active", out reason);
         uint foreground = memory.ReadU32(TilemapAddress);
         uint tileDefinitions = memory.ReadU32(TileDefinitionsAddress);
-        if (!IsGuestPointer(foreground) || !IsGuestPointer(tileDefinitions)) return Unsafe("Tilemap pointers are invalid", out reason);
+        if (!IsGuestPointer(foreground) || !IsGuestPointer(tileDefinitions)) return Unsafe("TILE", "Tilemap pointers are invalid", out reason);
         uint collisionTable = memory.ReadU32(tileDefinitions + 0x0C);
-        if (!IsGuestPointer(collisionTable)) return Unsafe("Tile collision table is invalid", out reason);
+        if (!IsGuestPointer(collisionTable)) return Unsafe("COLPTR", "Tile collision table is invalid", out reason);
         uint horizontalSize = memory.ReadU32(TilemapAddress + 0x20);
         uint verticalSize = memory.ReadU32(TilemapAddress + 0x24);
-        if (horizontalSize is 0 or > 0x100 || verticalSize is 0 or > 0x100) return Unsafe("Tilemap dimensions are invalid", out reason);
+        if (horizontalSize is 0 or > 0x100 || verticalSize is 0 or > 0x100) return Unsafe("DIM", "Tilemap dimensions are invalid", out reason);
 
         _collisionFunction = memory.ReadU32(GameApi.CheckCollisionAddr);
         if (_collisionFunction != ExpectedCollisionFunction)
         {
             _collisionDisabled = true;
             _collisionFailureReason = $"Collision API mismatch: expected 0x{ExpectedCollisionFunction:X8}, got 0x{_collisionFunction:X8}";
-            return Unsafe($"Collision API mismatch: 0x{_collisionFunction:X8}", out reason);
+            return Unsafe("API", $"Collision API mismatch: 0x{_collisionFunction:X8}", out reason);
         }
         return true;
     }
 
-    private static bool Unsafe(string value, out string reason)
+    private bool Unsafe(string code, string value, out string reason)
     {
+        _safeCode = code;
         reason = value;
         return false;
     }
@@ -773,13 +881,16 @@ public sealed class CoopFeasibility : IMod
 
     private void ResetDiagnostic()
     {
+        _diagnosticGeneration++;
         _fatal = false;
         _firstError = "none";
         _collisionDisabled = false;
         _collisionFailureReason = "none";
         _enabled = true;
         _safeFrame = false;
+        _safeCode = "WAIT";
         _safeReason = "Diagnostic reset; waiting for gameplay";
+        _operationStatus = "Diagnostic reset; initialization awaiting a safe player update";
         _vsyncCalls = _mainEngineCalls = _updateCalls = _renderCalls = _pad2Reads = 0;
         _connectionChanges = 0;
         _previousConnected = Controller.Connected2;
@@ -787,11 +898,18 @@ public sealed class CoopFeasibility : IMod
         _hostState = _padState = 0xFFFF;
         _gamePressed = _gameTapped = 0;
         _neutralSeen = false;
+        _virtualPressed = 0;
+        _virtualDownSeen = _virtualUpSeen = 0;
+        _virtualNeutralSeen = false;
+        _virtualNeutralObserved = false;
+        _virtualSuppressionFrames = 2;
+        _virtualForcedReleases = 0;
         _visualConfirmed = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
         _leftXMax = _leftYMax = _rightXMax = _rightYMax = 0;
         _proxyInitialized = false;
         _reinitializeRequested = false;
+        _proxyResetRequests = _proxyResetCompletions = 0;
         _leftDistanceRaw = _rightDistanceRaw = 0;
         _jumpObserved = false;
         _jumpPending = false;
@@ -836,8 +954,13 @@ public sealed class CoopFeasibility : IMod
         int gameCount = CountSeen(_gameSeen, RequiredGameButtons);
         int tapCount = CountSeen(_tapSeen, RequiredGameButtons);
         int axisCount = ActiveAxisCount();
-        char input = Controller.Connected2 && hostCount == 7 && padCount == 7 && gameCount == 7 && tapCount == 7 &&
-            (!_physicalControllerTest || axisCount == 4) ? 'P' : 'W';
+        int virtualDownCount = CountSeen(_virtualDownSeen, RequiredGameButtons);
+        int virtualUpCount = CountSeen(_virtualUpSeen, RequiredGameButtons);
+        char input = _virtualKeyboard
+            ? virtualDownCount == 7 && virtualUpCount == 7 && padCount == 7 && gameCount == 7 && tapCount == 7 &&
+              _virtualNeutralObserved && _virtualPressed == 0 ? 'P' : 'W'
+            : Controller.Connected2 && hostCount == 7 && padCount == 7 && gameCount == 7 && tapCount == 7 &&
+              (!_physicalControllerTest || axisCount == 4) ? 'P' : 'W';
         char movement = (_leftDistanceRaw >> 16) >= 8 && (_rightDistanceRaw >> 16) >= 8 && _jumpObserved ? 'P' : 'W';
         char render = _visualConfirmed && _renderSubmitted >= 60 ? 'P' : 'W';
         char collision = _collisionDisabled || _collisionRestoreFailures != 0 ? 'F' :
@@ -848,12 +971,17 @@ public sealed class CoopFeasibility : IMod
         char slots = _slotSamples < 5 ? 'W' : _minimumFreeAttack == 0 ? 'F' :
             _minimumFreeAttack >= 4 && _minimumLongestAttack >= 2 ? 'P' : 'W';
 
-        return $"P2D1 V={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} I={input}:{hostCount}/{padCount}/{gameCount}/{tapCount}/A{axisCount} " +
+        string inputReport = _virtualKeyboard
+            ? $"I={input}:K:-/{padCount}/{gameCount}/{tapCount}/A- K={virtualDownCount}/{virtualUpCount}/H{_virtualPressed:X4}/N{Bool(_virtualNeutralObserved)}"
+            : $"I={input}:C:{hostCount}/{padCount}/{gameCount}/{tapCount}/A{axisCount} K=-";
+
+        return $"P2D1 V={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
                $"M={movement}:{_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16}/{Bool(_jumpObserved)} " +
                $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)} " +
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents} " +
-               $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} E={ErrorCode()}";
+               $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
+               $"G={_safeCode}:E{Bool(_enabled)}S{Bool(_safeFrame)}P{Bool(_proxyInitialized)} Q={_diagnosticGeneration}/{_proxyResetRequests}/{_proxyResetCompletions}/{Bool(_reinitializeRequested)} E={ErrorCode()}";
     }
 
     private string MissingHostButtons()
@@ -872,13 +1000,13 @@ public sealed class CoopFeasibility : IMod
     private static string MissingGameButtons(ushort seen)
     {
         string value = "";
-        AppendMissing(ref value, seen, (ushort)Button.Up, "Up");
-        AppendMissing(ref value, seen, (ushort)Button.Right, "Right");
-        AppendMissing(ref value, seen, (ushort)Button.Down, "Down");
-        AppendMissing(ref value, seen, (ushort)Button.Left, "Left");
-        AppendMissing(ref value, seen, (ushort)Button.Cross, "Cross");
-        AppendMissing(ref value, seen, (ushort)Button.Circle, "Circle");
-        AppendMissing(ref value, seen, (ushort)Button.Start, "Start");
+        AppendMissing(ref value, seen, (ushort)GameButton.Up, "Up");
+        AppendMissing(ref value, seen, (ushort)GameButton.Right, "Right");
+        AppendMissing(ref value, seen, (ushort)GameButton.Down, "Down");
+        AppendMissing(ref value, seen, (ushort)GameButton.Left, "Left");
+        AppendMissing(ref value, seen, (ushort)GameButton.Cross, "Cross");
+        AppendMissing(ref value, seen, (ushort)GameButton.Circle, "Circle");
+        AppendMissing(ref value, seen, (ushort)GameButton.Start, "Start");
         return value.Length == 0 ? "none" : value;
     }
 
@@ -901,7 +1029,87 @@ public sealed class CoopFeasibility : IMod
         return count;
     }
 
-    private static bool IsGamePressed(Button button) => (Game.Pressed2 & (ushort)button) != 0;
+    private static ushort VirtualButtonFor(Key key) => key switch
+    {
+        Key.I => (ushort)GameButton.Up,
+        Key.L => (ushort)GameButton.Right,
+        Key.K => (ushort)GameButton.Down,
+        Key.J => (ushort)GameButton.Left,
+        Key.U => (ushort)GameButton.Cross,
+        Key.O => (ushort)GameButton.Circle,
+        Key.P => (ushort)GameButton.Start,
+        _ => 0,
+    };
+
+    private static ushort ReadVirtualKeysDown()
+    {
+        ushort held = 0;
+        if (HostWindow.IsKeyDown(Key.I)) held |= (ushort)GameButton.Up;
+        if (HostWindow.IsKeyDown(Key.L)) held |= (ushort)GameButton.Right;
+        if (HostWindow.IsKeyDown(Key.K)) held |= (ushort)GameButton.Down;
+        if (HostWindow.IsKeyDown(Key.J)) held |= (ushort)GameButton.Left;
+        if (HostWindow.IsKeyDown(Key.U)) held |= (ushort)GameButton.Cross;
+        if (HostWindow.IsKeyDown(Key.O)) held |= (ushort)GameButton.Circle;
+        if (HostWindow.IsKeyDown(Key.P)) held |= (ushort)GameButton.Start;
+        return held;
+    }
+
+    private void ReconcileVirtualKeys()
+    {
+        ushort held = ReadVirtualKeysDown();
+        if (_virtualSuppressionFrames > 0 || !_enabled || _fatal || HostUiCapturesKeyboard())
+        {
+            if (_virtualPressed != 0) _virtualForcedReleases++;
+            _virtualPressed = 0;
+            _virtualNeutralSeen = held == 0;
+            return;
+        }
+
+        if (held == 0)
+        {
+            if (_virtualPressed != 0) _virtualForcedReleases++;
+            _virtualPressed = 0;
+            _virtualNeutralSeen = true;
+        }
+        else if (_virtualNeutralSeen) _virtualPressed = held;
+        else _virtualPressed = 0;
+    }
+
+    private bool VirtualInputAllowed(IMemory memory) =>
+        _enabled && !_fatal && _virtualSuppressionFrames == 0 &&
+        !HostUiCapturesKeyboard() &&
+        Game.Available && Game.InAlucardMode() && !Game.IsLoading &&
+        !Game.MenuOpen && !Game.MapOpen && DisplayModeHooks.IsStage &&
+        memory.ReadU32(CutsceneControlAddress) == 0 &&
+        !IsSpecialTransition(memory.ReadU32(SpecialTransitionAddress));
+
+    private void SetVirtualKeyboard(bool enabled)
+    {
+        ReleaseVirtualKeys();
+        _virtualKeyboard = enabled;
+        _physicalControllerTest = false;
+        _previousConnected = Controller.Connected2;
+        ClearInputObservations();
+        _operationStatus = enabled
+            ? "Virtual Player 2 keyboard enabled; release I/J/K/L/U/O/P once"
+            : "Configured Pad 2 selected; release its buttons once";
+    }
+
+    private void ReleaseVirtualKeys()
+    {
+        if (_virtualPressed != 0) _virtualForcedReleases++;
+        _virtualPressed = 0;
+        _virtualNeutralSeen = false;
+    }
+
+    private void QueueProxyReset()
+    {
+        _proxyResetRequests++;
+        _reinitializeRequested = true;
+        _operationStatus = "Proxy reset queued";
+    }
+
+    private static bool IsGamePressed(GameButton button) => (Game.Pressed2 & (ushort)button) != 0;
 
     private static bool BlocksSide(uint effects) =>
         (effects & EffectSolid) != 0 && (effects & (EffectSolidFromAbove | EffectSolidFromBelow | EffectSlopeMask)) == 0;
@@ -923,6 +1131,11 @@ public sealed class CoopFeasibility : IMod
 
     private static bool IsGuestPointer(uint value) => value >= 0x80010000 && value < 0x80200000;
 
+    private static bool IsSpecialTransition(uint value) =>
+        value is >= 2 and <= 6 || (value & 0x88000000) != 0;
+
+    private static bool HostUiCapturesKeyboard() => ImGui.GetIO().WantCaptureKeyboard;
+
     private void BeginTransition()
     {
         if (!_roomKnown) return;
@@ -939,6 +1152,9 @@ public sealed class CoopFeasibility : IMod
     {
         _hostSeen = _padSeen = _gameSeen = _tapSeen = 0;
         _neutralSeen = false;
+        _virtualDownSeen = _virtualUpSeen = 0;
+        _virtualNeutralSeen = false;
+        _virtualNeutralObserved = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
         _leftXMax = _leftYMax = _rightXMax = _rightYMax = 0;
     }
