@@ -16,7 +16,7 @@ namespace CoopFeasibilityMod;
 
 public sealed class CoopFeasibility : IMod
 {
-    private const string Version = "0.1.3";
+    private const string Version = "0.1.4";
     private const uint ExpectedCollisionFunction = 0x800EF45C;
 
     private const uint GameStepAddress = 0x80073060;
@@ -35,9 +35,24 @@ public sealed class CoopFeasibility : IMod
     private const uint PlayerWorldYAddress = 0x800973F4;
 
     private const uint CurrentBufferPointer = 0x8006C37C;
+    private const uint GpuBuffersAddress = 0x8003CB08;
+    private const uint GpuBufferStride = 0x177F4;
     private const uint BackbufferXAddress = 0x8006C39C;
     private const uint BackbufferYAddress = 0x8006C3A0;
+    private const uint TimerAddress = 0x8003C998;
+    private const uint GpuUsageGt4Address = 0x80097930;
     private const uint OrderingTableOffset = 0x474;
+    private const uint GpuGt4Offset = 0x3C74;
+    private const uint GpuGt4Stride = 0x34;
+    private const uint MaxGpuGt4 = 0x300;
+
+    private const uint PlayerEntityAddress = 0x800733D8;
+    private const uint EntityFacingOffset = 0x14;
+    private const uint EntityDrawFlagsOffset = 0x19;
+    private const uint EntityAnimSetOffset = 0x54;
+    private const uint EntityAnimFrameOffset = 0x56;
+    private const uint EntityPlayerDrawOffset = 0x5A;
+    private const byte EntityBlink = 0x80;
 
     private const int FixedOne = 0x10000;
     private const int RunSpeed = 0x18000;
@@ -134,6 +149,21 @@ public sealed class CoopFeasibility : IMod
     private long _renderEligible;
     private long _renderSubmitted;
     private long _drawOtCalls;
+    private bool _nativeCapturePending;
+    private bool _nativeSpriteDrawnThisFrame;
+    private uint _nativeCaptureBuffer;
+    private uint _nativeCaptureGt4;
+    private int _nativeCaptureAnchorX;
+    private int _nativeCaptureAnchorY;
+    private bool _nativeCaptureFacingLeft;
+    private long _nativeSpriteEligible;
+    private long _nativeSpriteCaptured;
+    private long _nativeSpriteSubmitted;
+    private long _nativeSpriteFlipped;
+    private long _nativeSpriteFallbacks;
+    private int _nativeSpriteStreak;
+    private bool _nativeSpriteFlipSeenInStreak;
+    private string _nativeSpriteStatus = "WAIT";
     private long _collisionCalls;
     private int _collisionRestoreFailures;
     private int _invalidCorrections;
@@ -216,7 +246,7 @@ public sealed class CoopFeasibility : IMod
             SetVirtualKeyboard(virtualKeyboard);
 
         bool visible = _visualConfirmed;
-        if (ImGui.Checkbox("I can see the proxy", ref visible)) _visualConfirmed = visible;
+        if (ImGui.Checkbox("I can see the Player 2 avatar", ref visible)) _visualConfirmed = visible;
 
         bool physicalController = _physicalControllerTest;
         if (ImGui.Checkbox("Require analog test (physical controller 2)", ref physicalController))
@@ -261,7 +291,8 @@ public sealed class CoopFeasibility : IMod
         ImGui.Text($"Proxy: {(_proxyInitialized ? "active" : "waiting")} | world {_proxyX >> 16}, {_proxyY >> 16} | velocity {_velocityX / 65536f:F2}, {_velocityY / 65536f:F2}");
         ImGui.Text($"Grounded: {_grounded} | collision this frame: {_collisionThisFrame} | moved L/R: {_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16} | jumped: {_jumpObserved}");
         ImGui.Text($"Collision API: 0x{_collisionFunction:X8} | calls: {_collisionCalls} | restore failures: {_collisionRestoreFailures} | rejected corrections: {_invalidCorrections}");
-        ImGui.Text($"GP0 draws/eligible/DrawOTag: {_renderSubmitted}/{_renderEligible}/{_drawOtCalls} | HLE active/ready: {GpuHle.Active}/{GpuHle.Backend?.Ready == true}");
+        ImGui.Text($"Avatar frames/eligible/DrawOTag: {_renderSubmitted}/{_renderEligible}/{_drawOtCalls} | HLE active/ready: {GpuHle.Active}/{GpuHle.Backend?.Ready == true}");
+        ImGui.Text($"Native sprite submitted/captured/eligible/flipped/fallback: {_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks} | streak {_nativeSpriteStreak}, flipped {Bool(_nativeSpriteFlipSeenInStreak)} | {_nativeSpriteStatus}");
         ImGui.Text($"Collision contacts ground/wall/ceiling/one-way: {_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/{_oneWayContacts}");
         ImGui.Text($"Transitions passed/completed/layer events/post-move: {_passedTransitions}/{_completedTransitions}/{_roomLayerEvents}/{_postTransitionMoved}");
         ImGui.Text($"Free slots player/attack/stage/tail: {_freePlayerCurrent}/{_freeAttackCurrent}/{_freeStageCurrent}/{_freeTailCurrent}");
@@ -272,7 +303,7 @@ public sealed class CoopFeasibility : IMod
         ImGui.TextWrapped(report);
         if (_fatal) ImGui.TextWrapped($"First error: {_firstError}");
         else if (_collisionDisabled) ImGui.TextWrapped($"Collision disabled: {_collisionFailureReason}");
-        ImGui.TextDisabled("The proxy uses no SOTN entity slot and does not modify saves, progression, Player 1, or enemies.");
+        ImGui.TextDisabled("The proxy uses no SOTN entity or persistent primitive slot and does not modify saves, progression, Player 1, or enemies.");
     }
 
     private void OnVSync(VSyncEvent e)
@@ -345,6 +376,8 @@ public sealed class CoopFeasibility : IMod
             CancelAutomaticTest("player reloaded");
             ReleaseVirtualKeys();
             _proxyInitialized = false;
+            ResetNativeSpriteFrame();
+            _visualConfirmed = false;
             _roomKnown = false;
             _transitionPending = false;
             _awaitingPostTransitionMovement = false;
@@ -367,6 +400,7 @@ public sealed class CoopFeasibility : IMod
             _roomLayerEvents++;
             BeginTransition();
             _proxyInitialized = false;
+            ResetNativeSpriteFrame();
             _roomStableFrames = 0;
             _visualConfirmed = false;
             _safeReason = $"Room layer event: stage 0x{e.StageId:X2}, layer {e.LayerIndex}";
@@ -414,6 +448,21 @@ public sealed class CoopFeasibility : IMod
         }
     }
 
+    [PreHook("dra", "RenderEntities")]
+    private static void BeforeRenderEntities(CpuContext context, IMemory memory)
+    {
+        CoopFeasibility? mod = _instance;
+        if (mod == null) return;
+        try
+        {
+            mod.PrepareNativeSpriteCapture(memory);
+        }
+        catch (Exception ex)
+        {
+            mod.Fail("RenderEntities pre-hook", ex);
+        }
+    }
+
     [PostHook("dra", "RenderEntities")]
     private static void AfterRenderEntities(CpuContext context, IMemory memory)
     {
@@ -422,6 +471,8 @@ public sealed class CoopFeasibility : IMod
         try
         {
             mod._renderCalls++;
+            if (mod._fatal) return;
+            mod.SubmitNativeSprite(memory);
         }
         catch (Exception ex)
         {
@@ -715,15 +766,26 @@ public sealed class CoopFeasibility : IMod
 
     private void DrawProxyGp0(CpuContext context, IMemory memory)
     {
+        uint currentBuffer = memory.ReadU32(CurrentBufferPointer);
+        if (!IsGpuBuffer(currentBuffer))
+        {
+            _nativeSpriteDrawnThisFrame = false;
+            return;
+        }
+        uint expectedOt = (currentBuffer + OrderingTableOffset) & 0x1FFFFC;
+        if ((context.A0 & 0x1FFFFC) != expectedOt) return;
+        bool nativeSpriteDrawn = _nativeSpriteDrawnThisFrame;
+        _nativeSpriteDrawnThisFrame = false;
+
         if (!_enabled || !_safeFrame || !_proxyInitialized || !Game.Available || !Game.InGame || Game.IsLoading ||
             Game.MenuOpen || Game.MapOpen || !DisplayModeHooks.IsStage)
             return;
-
-        uint currentBuffer = memory.ReadU32(CurrentBufferPointer);
-        if (currentBuffer == 0) return;
-        uint expectedOt = (currentBuffer + OrderingTableOffset) & 0x1FFFFC;
-        if ((context.A0 & 0x1FFFFC) != expectedOt) return;
         _renderEligible++;
+        if (nativeSpriteDrawn)
+        {
+            _renderSubmitted++;
+            return;
+        }
 
         var gpu = RecompOne.Runtime.Runtime.Gpu;
         if (gpu == null) return;
@@ -743,7 +805,203 @@ public sealed class CoopFeasibility : IMod
         DrawGpuTile(gpu, x - HalfWidth, y + HeadOffset, HalfWidth * 2,
             FootOffset - HeadOffset, r, g, 255);
         DrawGpuTile(gpu, x + (_facingLeft ? -5 : 2), y - 6, 3, 3, 255, 232, 32);
+        _nativeSpriteFallbacks++;
+        _nativeSpriteStreak = 0;
+        _nativeSpriteFlipSeenInStreak = false;
         _renderSubmitted++;
+    }
+
+    private void PrepareNativeSpriteCapture(IMemory memory)
+    {
+        _nativeCapturePending = false;
+        _nativeSpriteDrawnThisFrame = false;
+        if (!_enabled || _fatal || !_safeFrame || !_proxyInitialized || !Game.Available || !Game.InGame ||
+            Game.IsLoading || Game.MenuOpen || Game.MapOpen || !DisplayModeHooks.IsStage || _transitionPending)
+        {
+            _nativeSpriteStatus = "WAIT";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        short animSet = unchecked((short)memory.ReadU16(PlayerEntityAddress + EntityAnimSetOffset));
+        ushort animFrame = memory.ReadU16(PlayerEntityAddress + EntityAnimFrameOffset);
+        if (animSet != 1)
+        {
+            _nativeSpriteStatus = "ANIM";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        if ((animFrame & 0x7FFF) == 0)
+        {
+            _nativeSpriteStatus = "FRAME";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        if (memory.ReadU16(PlayerEntityAddress + EntityPlayerDrawOffset) != 0)
+        {
+            _nativeSpriteStatus = "PDRAW";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        byte drawFlags = memory.ReadU8(PlayerEntityAddress + EntityDrawFlagsOffset);
+        if ((drawFlags & EntityBlink) != 0 && (memory.ReadU32(TimerAddress) & 1) != 0)
+        {
+            _nativeSpriteStatus = "BLINK";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        int backbufferX = unchecked((int)memory.ReadU32(BackbufferXAddress));
+        int backbufferY = unchecked((int)memory.ReadU32(BackbufferYAddress));
+        int anchorX = unchecked((short)memory.ReadU16(PlayerEntityAddress + 0x02)) + backbufferX;
+        int anchorY = unchecked((short)memory.ReadU16(PlayerEntityAddress + 0x06)) + backbufferY;
+        if (anchorX is < -512 or > 512 || anchorY is < -512 or > 512)
+        {
+            _nativeSpriteStatus = "OFF";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        uint buffer = memory.ReadU32(CurrentBufferPointer);
+        uint gt4 = memory.ReadU32(GpuUsageGt4Address);
+        if (!IsGpuBuffer(buffer))
+        {
+            _nativeSpriteStatus = "BUFFER";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        if (gt4 >= MaxGpuGt4)
+        {
+            _nativeSpriteStatus = "POOL";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        _nativeCaptureBuffer = buffer;
+        _nativeCaptureGt4 = gt4;
+        _nativeCaptureAnchorX = anchorX;
+        _nativeCaptureAnchorY = anchorY;
+        _nativeCaptureFacingLeft = memory.ReadU16(PlayerEntityAddress + EntityFacingOffset) != 0;
+        _nativeCapturePending = true;
+        _nativeSpriteEligible++;
+        _nativeSpriteStatus = "READY";
+    }
+
+    private void SubmitNativeSprite(IMemory memory)
+    {
+        if (!_nativeCapturePending) return;
+        _nativeCapturePending = false;
+
+        uint buffer = memory.ReadU32(CurrentBufferPointer);
+        uint used = memory.ReadU32(GpuUsageGt4Address);
+        if (buffer != _nativeCaptureBuffer || used <= _nativeCaptureGt4)
+        {
+            _nativeSpriteStatus = "POST";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        if (used >= MaxGpuGt4)
+        {
+            _nativeSpriteStatus = "POOL";
+            ResetNativeSpriteStreak();
+            return;
+        }
+
+        uint source = buffer + GpuGt4Offset + _nativeCaptureGt4 * GpuGt4Stride;
+        uint destination = buffer + GpuGt4Offset + used * GpuGt4Stride;
+        uint sourceTag = memory.ReadU32(source);
+        byte command = memory.ReadU8(source + 0x07);
+        if ((sourceTag >> 24) != 12)
+        {
+            _nativeSpriteStatus = "TAG";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        if ((command & 0xFC) != 0x3C)
+        {
+            _nativeSpriteStatus = "CMD";
+            ResetNativeSpriteStreak();
+            return;
+        }
+        _nativeSpriteCaptured++;
+
+        int scrollX = unchecked((int)memory.ReadU32(ScrollXAddress)) >> 16;
+        int scrollY = unchecked((int)memory.ReadU32(ScrollYAddress)) >> 16;
+        int targetX = unchecked((int)memory.ReadU32(BackbufferXAddress)) + (_proxyX >> 16) - scrollX;
+        int targetY = unchecked((int)memory.ReadU32(BackbufferYAddress)) + (_proxyY >> 16) - scrollY;
+        bool flip = _nativeCaptureFacingLeft != _facingLeft;
+
+        Span<int> transformed = stackalloc int[8];
+        ReadOnlySpan<uint> coordinateOffsets = [0x08, 0x14, 0x20, 0x2C];
+        for (int i = 0; i < coordinateOffsets.Length; i++)
+        {
+            uint offset = coordinateOffsets[i];
+            int sourceX = unchecked((short)memory.ReadU16(source + offset));
+            int sourceY = unchecked((short)memory.ReadU16(source + offset + 2));
+            int x = targetX + (flip ? -(sourceX - _nativeCaptureAnchorX) : sourceX - _nativeCaptureAnchorX);
+            int y = targetY + sourceY - _nativeCaptureAnchorY;
+            if (x is < -1024 or > 1023 || y is < -1024 or > 1023)
+            {
+                _nativeSpriteStatus = "POS";
+                ResetNativeSpriteStreak();
+                return;
+            }
+            transformed[i * 2] = x;
+            transformed[i * 2 + 1] = y;
+        }
+
+        for (uint offset = 0x04; offset < GpuGt4Stride; offset += 4)
+            memory.WriteU32(destination + offset, memory.ReadU32(source + offset));
+        for (int i = 0; i < coordinateOffsets.Length; i++)
+        {
+            uint offset = coordinateOffsets[i];
+            memory.WriteU32(destination + offset,
+                ((uint)(ushort)transformed[i * 2 + 1] << 16) | (ushort)transformed[i * 2]);
+        }
+
+        // Modulate the copied native frame so Player 2 remains visually distinct.
+        memory.WriteU8(destination + 0x04, 96);
+        memory.WriteU8(destination + 0x05, 176);
+        memory.WriteU8(destination + 0x06, 255);
+        memory.WriteU8(destination + 0x07, (byte)(command & ~1));
+        SetNativeSpriteColor(memory, destination + 0x10);
+        SetNativeSpriteColor(memory, destination + 0x1C);
+        SetNativeSpriteColor(memory, destination + 0x28);
+
+        // Reserve first, then splice after Player 1. Any later write failure leaves
+        // either an unlinked reserved packet or a linked packet that cannot be reused.
+        memory.WriteU32(GpuUsageGt4Address, used + 1);
+        memory.WriteU32(destination, 12u << 24 | (sourceTag & 0x00FFFFFFu));
+        memory.WriteU32(source, (sourceTag & 0xFF000000u) | (destination & 0x00FFFFFFu));
+
+        _nativeSpriteDrawnThisFrame = true;
+        _nativeSpriteSubmitted++;
+        if (flip) _nativeSpriteFlipped++;
+        _nativeSpriteStreak++;
+        if (flip) _nativeSpriteFlipSeenInStreak = true;
+        _nativeSpriteStatus = "OK";
+    }
+
+    private static void SetNativeSpriteColor(IMemory memory, uint address)
+    {
+        memory.WriteU8(address, 96);
+        memory.WriteU8(address + 1, 176);
+        memory.WriteU8(address + 2, 255);
+    }
+
+    private void ResetNativeSpriteFrame()
+    {
+        _nativeCapturePending = false;
+        _nativeSpriteDrawnThisFrame = false;
+        ResetNativeSpriteStreak();
+        _nativeSpriteStatus = "WAIT";
+    }
+
+    private void ResetNativeSpriteStreak()
+    {
+        _nativeSpriteStreak = 0;
+        _nativeSpriteFlipSeenInStreak = false;
     }
 
     private static bool WriteStageDrawEnvironment(RecompOne.Runtime.Gpu gpu, IMemory memory, uint buffer)
@@ -945,6 +1203,13 @@ public sealed class CoopFeasibility : IMod
         _collisionFunction = 0;
         _sawSolid = _sawEmpty = false;
         _renderEligible = _renderSubmitted = _drawOtCalls = 0;
+        _nativeCapturePending = false;
+        _nativeSpriteDrawnThisFrame = false;
+        _nativeSpriteEligible = _nativeSpriteCaptured = _nativeSpriteSubmitted = 0;
+        _nativeSpriteFlipped = _nativeSpriteFallbacks = 0;
+        _nativeSpriteStreak = 0;
+        _nativeSpriteFlipSeenInStreak = false;
+        _nativeSpriteStatus = "WAIT";
         _roomKnown = false;
         _roomStableFrames = 0;
         _transitionPending = false;
@@ -988,6 +1253,8 @@ public sealed class CoopFeasibility : IMod
               (!_physicalControllerTest || axisCount == 4) ? 'P' : 'W';
         char movement = (_leftDistanceRaw >> 16) >= 8 && (_rightDistanceRaw >> 16) >= 8 && _jumpObserved ? 'P' : 'W';
         char render = _visualConfirmed && _renderSubmitted >= 60 ? 'P' : 'W';
+        char nativeSprite = _visualConfirmed && _nativeSpriteSubmitted >= 60 &&
+            _nativeSpriteStreak >= 60 && _nativeSpriteFlipSeenInStreak && _nativeSpriteStatus == "OK" ? 'P' : 'W';
         char collision = _collisionDisabled || _collisionRestoreFailures != 0 ? 'F' :
             _collisionCalls >= 120 && _sawSolid && _sawEmpty && _groundContacts > 0 &&
             _wallCorrections > 0 && _ceilingCorrections > 0 ? 'P' : 'W';
@@ -1003,6 +1270,7 @@ public sealed class CoopFeasibility : IMod
         return $"P2D1 V={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
                $"M={movement}:{_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16}/{Bool(_jumpObserved)} " +
                $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)}/D{_drawOtCalls}/H{Bool(GpuHle.Active)}{Bool(GpuHle.Backend?.Ready == true)} " +
+               $"N={nativeSprite}:{_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks}/S{_nativeSpriteStreak}/F{Bool(_nativeSpriteFlipSeenInStreak)}/L{_nativeSpriteStatus} " +
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents} " +
                $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
@@ -1250,6 +1518,9 @@ public sealed class CoopFeasibility : IMod
     private static string DisplayMinimum(int value) => value == int.MaxValue ? "-" : value.ToString();
 
     private static bool IsGuestPointer(uint value) => value >= 0x80010000 && value < 0x80200000;
+
+    private static bool IsGpuBuffer(uint value) =>
+        value == GpuBuffersAddress || value == GpuBuffersAddress + GpuBufferStride;
 
     private static bool IsSpecialTransition(uint value) =>
         value is >= 2 and <= 6 || (value & 0x88000000) != 0;
