@@ -16,7 +16,7 @@ namespace CoopFeasibilityMod;
 
 public sealed class CoopFeasibility : IMod
 {
-    private const string Version = "0.1.4";
+    private const string Version = "0.1.5";
     private const uint ExpectedCollisionFunction = 0x800EF45C;
 
     private const uint GameStepAddress = 0x80073060;
@@ -47,12 +47,36 @@ public sealed class CoopFeasibility : IMod
     private const uint MaxGpuGt4 = 0x300;
 
     private const uint PlayerEntityAddress = 0x800733D8;
+    private const uint EntityHitboxOffsetX = 0x10;
+    private const uint EntityHitboxOffsetY = 0x12;
     private const uint EntityFacingOffset = 0x14;
     private const uint EntityDrawFlagsOffset = 0x19;
+    private const uint EntityIdOffset = 0x26;
+    private const uint EntityUpdateOffset = 0x28;
+    private const uint EntityFlagsOffset = 0x34;
+    private const uint EntityEnemyIdOffset = 0x3A;
+    private const uint EntityHitboxStateOffset = 0x3C;
+    private const uint EntityAttackOffset = 0x40;
+    private const uint EntityHitboxWidthOffset = 0x46;
+    private const uint EntityHitboxHeightOffset = 0x47;
     private const uint EntityAnimSetOffset = 0x54;
     private const uint EntityAnimFrameOffset = 0x56;
     private const uint EntityPlayerDrawOffset = 0x5A;
     private const byte EntityBlink = 0x80;
+    private const uint EntityDead = 0x100;
+    private const int ContactSlotStart = 64;
+    private const int ContactSlotCount = 128;
+
+    private const uint ProtectedPlayerRuntimeAddress = 0x80072BD0;
+    private const int ProtectedPlayerRuntimeLength = 0x03CE;
+    private const uint ProtectedStatusAddress = 0x80097964;
+    private const int ProtectedStatusLength = 0x0334;
+    private const uint ProtectedCastleFlagsAddress = 0x8003BDEC;
+    private const int ProtectedCastleFlagsLength = 0x0300;
+    private const uint ProtectedCastleMapAddress = 0x8006BB74;
+    private const int ProtectedCastleMapLength = 0x0800;
+    private const uint ProtectedSaveWorkspaceAddress = 0x801EA000;
+    private const int ProtectedSaveWorkspaceLength = 0x11CC;
 
     private const int FixedOne = 0x10000;
     private const int RunSpeed = 0x18000;
@@ -164,6 +188,34 @@ public sealed class CoopFeasibility : IMod
     private int _nativeSpriteStreak;
     private bool _nativeSpriteFlipSeenInStreak;
     private string _nativeSpriteStatus = "WAIT";
+
+    private readonly ulong[] _contactIdentities = new ulong[ContactSlotCount];
+    private readonly ulong[] _nextContactIdentities = new ulong[ContactSlotCount];
+    private bool _contactBaselinePending = true;
+    private bool _contactDisabled;
+    private bool _contactOverlap;
+    private bool _contactVisualConfirmed;
+    private long _contactScanFrames;
+    private long _contactSlotsScanned;
+    private long _contactEligibleSamples;
+    private long _contactOverlapSamples;
+    private long _contactDamagingSamples;
+    private long _contactStaySamples;
+    private int _contactCurrent;
+    private int _contactPeak;
+    private int _contactEntries;
+    private int _contactExits;
+    private int _contactResets;
+    private int _contactGuardChecks;
+    private int _contactGuardFailures;
+    private int _contactLastSlot = -1;
+    private ushort _contactLastEntityId;
+    private int _contactOffsetX;
+    private int _contactOffsetY;
+    private int _contactHalfWidth;
+    private int _contactHalfHeight;
+    private string _contactGuardRegion = "none";
+    private string _contactStatus = "WAIT";
     private long _collisionCalls;
     private int _collisionRestoreFailures;
     private int _invalidCorrections;
@@ -218,6 +270,7 @@ public sealed class CoopFeasibility : IMod
         Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
         Event.RemoveListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
         _proxyInitialized = false;
+        SuspendContactScan("UNLOAD");
     }
 
     public void DrawSettings()
@@ -239,6 +292,7 @@ public sealed class CoopFeasibility : IMod
         {
             _enabled = enabled;
             _neutralSeen = false;
+            if (!enabled) SuspendContactScan("DISABLED");
         }
 
         bool virtualKeyboard = _virtualKeyboard;
@@ -247,6 +301,10 @@ public sealed class CoopFeasibility : IMod
 
         bool visible = _visualConfirmed;
         if (ImGui.Checkbox("I can see the Player 2 avatar", ref visible)) _visualConfirmed = visible;
+
+        bool contactVisible = _contactVisualConfirmed;
+        if (ImGui.Checkbox("I saw the Player 2 contact tint", ref contactVisible))
+            _contactVisualConfirmed = contactVisible;
 
         bool physicalController = _physicalControllerTest;
         if (ImGui.Checkbox("Require analog test (physical controller 2)", ref physicalController))
@@ -293,6 +351,10 @@ public sealed class CoopFeasibility : IMod
         ImGui.Text($"Collision API: 0x{_collisionFunction:X8} | calls: {_collisionCalls} | restore failures: {_collisionRestoreFailures} | rejected corrections: {_invalidCorrections}");
         ImGui.Text($"Avatar frames/eligible/DrawOTag: {_renderSubmitted}/{_renderEligible}/{_drawOtCalls} | HLE active/ready: {GpuHle.Active}/{GpuHle.Backend?.Ready == true}");
         ImGui.Text($"Native sprite submitted/captured/eligible/flipped/fallback: {_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks} | streak {_nativeSpriteStreak}, flipped {Bool(_nativeSpriteFlipSeenInStreak)} | {_nativeSpriteStatus}");
+        ImGui.Text($"Contact shadow current/peak/enter/stay/exit: {_contactCurrent}/{_contactPeak}/{_contactEntries}/{_contactStaySamples}/{_contactExits} | {_contactStatus}");
+        ImGui.Text($"Mirrored hurtbox offset {_contactOffsetX},{_contactOffsetY} half-size {_contactHalfWidth},{_contactHalfHeight} | last slot/id {_contactLastSlot}/{_contactLastEntityId}");
+        ImGui.Text($"Contact scans/slots/eligible/overlap/damaging: {_contactScanFrames}/{_contactSlotsScanned}/{_contactEligibleSamples}/{_contactOverlapSamples}/{_contactDamagingSamples}");
+        ImGui.Text($"Read-only guard checks/failures/region: {_contactGuardChecks}/{_contactGuardFailures}/{_contactGuardRegion}");
         ImGui.Text($"Collision contacts ground/wall/ceiling/one-way: {_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/{_oneWayContacts}");
         ImGui.Text($"Transitions passed/completed/layer events/post-move: {_passedTransitions}/{_completedTransitions}/{_roomLayerEvents}/{_postTransitionMoved}");
         ImGui.Text($"Free slots player/attack/stage/tail: {_freePlayerCurrent}/{_freeAttackCurrent}/{_freeStageCurrent}/{_freeTailCurrent}");
@@ -303,7 +365,8 @@ public sealed class CoopFeasibility : IMod
         ImGui.TextWrapped(report);
         if (_fatal) ImGui.TextWrapped($"First error: {_firstError}");
         else if (_collisionDisabled) ImGui.TextWrapped($"Collision disabled: {_collisionFailureReason}");
-        ImGui.TextDisabled("The proxy uses no SOTN entity or persistent primitive slot and does not modify saves, progression, Player 1, or enemies.");
+        else if (_contactDisabled) ImGui.TextWrapped($"Contact disabled: {_contactStatus} ({_contactGuardRegion})");
+        ImGui.TextDisabled("The proxy uses no SOTN entity or persistent primitive slot. Contact scanning cannot write Player 1, enemies, saves, or progression.");
     }
 
     private void OnVSync(VSyncEvent e)
@@ -378,6 +441,8 @@ public sealed class CoopFeasibility : IMod
             _proxyInitialized = false;
             ResetNativeSpriteFrame();
             _visualConfirmed = false;
+            _contactVisualConfirmed = false;
+            SuspendContactScan("PLAYER");
             _roomKnown = false;
             _transitionPending = false;
             _awaitingPostTransitionMovement = false;
@@ -401,6 +466,8 @@ public sealed class CoopFeasibility : IMod
             BeginTransition();
             _proxyInitialized = false;
             ResetNativeSpriteFrame();
+            _contactVisualConfirmed = false;
+            SuspendContactScan("TRANS");
             _roomStableFrames = 0;
             _visualConfirmed = false;
             _safeReason = $"Room layer event: stage 0x{e.StageId:X2}, layer {e.LayerIndex}";
@@ -419,11 +486,16 @@ public sealed class CoopFeasibility : IMod
         try
         {
             mod._mainEngineCalls++;
-            if (!Game.Available || !Game.InGame) return;
+            if (!Game.Available || !Game.InGame)
+            {
+                mod.SuspendContactScan("WAIT");
+                return;
+            }
             mod._gamePressed = Game.Pressed2;
             mod._gameTapped = Game.Tapped2;
             mod._gameSeen |= mod._gamePressed;
             mod._tapSeen |= mod._gameTapped;
+            mod.UpdateContactShadow(memory);
         }
         catch (Exception ex)
         {
@@ -800,10 +872,11 @@ public sealed class CoopFeasibility : IMod
         DrawGpuTile(gpu, x - HalfWidth - 1, y + HeadOffset - 1, HalfWidth * 2 + 2,
             FootOffset - HeadOffset + 2, 0, 0, 0);
 
-        byte r = _collisionThisFrame ? (byte)255 : (byte)32;
-        byte g = _grounded ? (byte)255 : (byte)192;
+        byte r = _contactOverlap ? (byte)255 : _collisionThisFrame ? (byte)255 : (byte)32;
+        byte g = _contactOverlap ? (byte)48 : _grounded ? (byte)255 : (byte)192;
+        byte b = _contactOverlap ? (byte)160 : (byte)255;
         DrawGpuTile(gpu, x - HalfWidth, y + HeadOffset, HalfWidth * 2,
-            FootOffset - HeadOffset, r, g, 255);
+            FootOffset - HeadOffset, r, g, b);
         DrawGpuTile(gpu, x + (_facingLeft ? -5 : 2), y - 6, 3, 3, 255, 232, 32);
         _nativeSpriteFallbacks++;
         _nativeSpriteStreak = 0;
@@ -960,14 +1033,17 @@ public sealed class CoopFeasibility : IMod
                 ((uint)(ushort)transformed[i * 2 + 1] << 16) | (ushort)transformed[i * 2]);
         }
 
-        // Modulate the copied native frame so Player 2 remains visually distinct.
-        memory.WriteU8(destination + 0x04, 96);
-        memory.WriteU8(destination + 0x05, 176);
-        memory.WriteU8(destination + 0x06, 255);
+        // Tint only the copied packet: cyan normally, magenta on contact.
+        byte tintR = _contactOverlap ? (byte)255 : (byte)96;
+        byte tintG = _contactOverlap ? (byte)48 : (byte)176;
+        byte tintB = _contactOverlap ? (byte)160 : (byte)255;
+        memory.WriteU8(destination + 0x04, tintR);
+        memory.WriteU8(destination + 0x05, tintG);
+        memory.WriteU8(destination + 0x06, tintB);
         memory.WriteU8(destination + 0x07, (byte)(command & ~1));
-        SetNativeSpriteColor(memory, destination + 0x10);
-        SetNativeSpriteColor(memory, destination + 0x1C);
-        SetNativeSpriteColor(memory, destination + 0x28);
+        SetNativeSpriteColor(memory, destination + 0x10, tintR, tintG, tintB);
+        SetNativeSpriteColor(memory, destination + 0x1C, tintR, tintG, tintB);
+        SetNativeSpriteColor(memory, destination + 0x28, tintR, tintG, tintB);
 
         // Reserve first, then splice after Player 1. Any later write failure leaves
         // either an unlinked reserved packet or a linked packet that cannot be reused.
@@ -983,11 +1059,11 @@ public sealed class CoopFeasibility : IMod
         _nativeSpriteStatus = "OK";
     }
 
-    private static void SetNativeSpriteColor(IMemory memory, uint address)
+    private static void SetNativeSpriteColor(IMemory memory, uint address, byte r, byte g, byte b)
     {
-        memory.WriteU8(address, 96);
-        memory.WriteU8(address + 1, 176);
-        memory.WriteU8(address + 2, 255);
+        memory.WriteU8(address, r);
+        memory.WriteU8(address + 1, g);
+        memory.WriteU8(address + 2, b);
     }
 
     private void ResetNativeSpriteFrame()
@@ -1002,6 +1078,234 @@ public sealed class CoopFeasibility : IMod
     {
         _nativeSpriteStreak = 0;
         _nativeSpriteFlipSeenInStreak = false;
+    }
+
+    private void UpdateContactShadow(IMemory memory)
+    {
+        if (_contactDisabled)
+        {
+            _contactStatus = _contactGuardFailures > 0 ? "GUARD" : "MEM";
+            return;
+        }
+        if (!ContactScanAllowed(memory))
+        {
+            SuspendContactScan("WAIT");
+            return;
+        }
+        if (memory is not PSMemory psMemory)
+        {
+            DisableContactScan("MEM", "memory");
+            return;
+        }
+
+        ReadOnlySpan<byte> ram = psMemory.Ram;
+        if (!TryBuildContactShape(ram, out ContactShape shape))
+        {
+            SuspendContactScan("SHAPE");
+            return;
+        }
+
+        ContactGuardSnapshot before = ContactGuardSnapshot.Capture(ram);
+        ContactScanResult result = ScanContactCandidates(ram, shape);
+        ContactGuardSnapshot after = ContactGuardSnapshot.Capture(ram);
+        _contactGuardChecks++;
+        if (!before.Matches(after))
+        {
+            _contactGuardFailures++;
+            DisableContactScan("GUARD", before.FirstDifference(after));
+            return;
+        }
+
+        CommitContactScan(result);
+    }
+
+    private bool ContactScanAllowed(IMemory memory) =>
+        !_fatal && !_contactDisabled && _safeFrame && AutomaticInputSafe(memory) &&
+        _roomKnown && ReadRoomIdentity(memory).Equals(_room);
+
+    private bool TryBuildContactShape(ReadOnlySpan<byte> ram, out ContactShape shape)
+    {
+        shape = default;
+        ushort state = ReadRamU16(ram, PlayerEntityAddress + EntityHitboxStateOffset);
+        int offsetX = ReadRamS16(ram, PlayerEntityAddress + EntityHitboxOffsetX);
+        int offsetY = ReadRamS16(ram, PlayerEntityAddress + EntityHitboxOffsetY);
+        int halfWidth = ReadRamU8(ram, PlayerEntityAddress + EntityHitboxWidthOffset);
+        int halfHeight = ReadRamU8(ram, PlayerEntityAddress + EntityHitboxHeightOffset);
+        if ((state & 1) == 0 || halfWidth is 0 or > 32 || halfHeight is 0 or > 32 ||
+            offsetX is < -64 or > 64 || offsetY is < -64 or > 64)
+            return false;
+
+        int scrollX = ReadRamS32(ram, ScrollXAddress) >> 16;
+        int scrollY = ReadRamS32(ram, ScrollYAddress) >> 16;
+        int playerX = ReadRamS16(ram, PlayerEntityAddress + 0x02);
+        bool shiftEnabled = !RecompOne.Runtime.Runtime.View.GetBool("WidescreenOriginalAspect", true) &&
+            RecompOne.Runtime.Hle.Display.WideMargin(256) != 0;
+        int widescreenShift = !shiftEnabled ? 0 :
+            playerX > 256 ? 256 - playerX : playerX < 0 ? -playerX : 0;
+        int centerX = (_proxyX >> 16) - scrollX + (_facingLeft ? -offsetX : offsetX) + widescreenShift;
+        int centerY = (_proxyY >> 16) - scrollY + offsetY;
+        if (centerX is < -32 or > 288 || centerY is < -32 or > 256) return false;
+
+        _contactOffsetX = offsetX;
+        _contactOffsetY = offsetY;
+        _contactHalfWidth = halfWidth;
+        _contactHalfHeight = halfHeight;
+        shape = new ContactShape(centerX, centerY, halfWidth, halfHeight, widescreenShift);
+        return true;
+    }
+
+    private ContactScanResult ScanContactCandidates(ReadOnlySpan<byte> ram, ContactShape shape)
+    {
+        Array.Clear(_nextContactIdentities);
+        int eligible = 0;
+        int overlaps = 0;
+        int damaging = 0;
+        int current = 0;
+        int lastSlot = -1;
+        ushort lastEntityId = 0;
+
+        for (int i = 0; i < ContactSlotCount; i++)
+        {
+            int slot = ContactSlotStart + i;
+            uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
+            ushort state = ReadRamU16(ram, entity + EntityHitboxStateOffset);
+            if ((state & 1) == 0) continue;
+
+            int halfWidth = ReadRamU8(ram, entity + EntityHitboxWidthOffset);
+            int halfHeight = ReadRamU8(ram, entity + EntityHitboxHeightOffset);
+            if (halfWidth == 0 || halfHeight == 0) continue;
+            if ((ReadRamU32(ram, entity + EntityFlagsOffset) & EntityDead) != 0) continue;
+
+            ushort entityId = ReadRamU16(ram, entity + EntityIdOffset);
+            uint update = ReadRamU32(ram, entity + EntityUpdateOffset);
+            if (entityId == 0 || update == 0) continue;
+
+            int offsetX = ReadRamS16(ram, entity + EntityHitboxOffsetX);
+            int offsetY = ReadRamS16(ram, entity + EntityHitboxOffsetY);
+            bool facingLeft = ReadRamU16(ram, entity + EntityFacingOffset) != 0;
+            int centerX = ReadRamS16(ram, entity + 0x02) + (facingLeft ? -offsetX : offsetX) + shape.WidescreenShift;
+            int centerY = ReadRamS16(ram, entity + 0x06) + offsetY;
+            if (centerX is <= -32 or >= 288 || centerY is <= -32 or >= 256) continue;
+            eligible++;
+
+            if (Math.Abs(centerX - shape.CenterX) >= halfWidth + shape.HalfWidth ||
+                Math.Abs(centerY - shape.CenterY) >= halfHeight + shape.HalfHeight)
+                continue;
+
+            ushort enemyId = ReadRamU16(ram, entity + EntityEnemyIdOffset);
+            ulong identity = ((ulong)update << 32) | ((ulong)enemyId << 16) | entityId;
+            _nextContactIdentities[i] = identity;
+            overlaps++;
+            current++;
+            if (ReadRamS16(ram, entity + EntityAttackOffset) > 0) damaging++;
+            lastSlot = slot;
+            lastEntityId = entityId;
+        }
+
+        return new ContactScanResult(eligible, overlaps, damaging, current, lastSlot, lastEntityId);
+    }
+
+    private void CommitContactScan(ContactScanResult result)
+    {
+        _contactScanFrames++;
+        _contactSlotsScanned += ContactSlotCount;
+        _contactEligibleSamples += result.Eligible;
+        _contactOverlapSamples += result.Overlaps;
+        _contactDamagingSamples += result.Damaging;
+        if (result.LastSlot >= 0)
+        {
+            _contactLastSlot = result.LastSlot;
+            _contactLastEntityId = result.LastEntityId;
+        }
+
+        if (_contactBaselinePending)
+        {
+            Array.Copy(_nextContactIdentities, _contactIdentities, ContactSlotCount);
+            _contactBaselinePending = false;
+        }
+        else
+        {
+            for (int i = 0; i < ContactSlotCount; i++)
+            {
+                ulong previous = _contactIdentities[i];
+                ulong current = _nextContactIdentities[i];
+                if (previous == current)
+                {
+                    if (current != 0) _contactStaySamples++;
+                }
+                else
+                {
+                    if (previous != 0) _contactExits++;
+                    if (current != 0) _contactEntries++;
+                }
+                _contactIdentities[i] = current;
+            }
+        }
+
+        _contactCurrent = result.Current;
+        _contactPeak = Math.Max(_contactPeak, _contactCurrent);
+        _contactOverlap = _contactCurrent != 0;
+        _contactStatus = _contactOverlap ? "CONTACT" : "OK";
+    }
+
+    private void SuspendContactScan(string status)
+    {
+        bool reset = !_contactBaselinePending || _contactCurrent != 0 || _contactOverlap;
+        Array.Clear(_contactIdentities);
+        Array.Clear(_nextContactIdentities);
+        _contactBaselinePending = true;
+        _contactCurrent = 0;
+        _contactOverlap = false;
+        if (reset) _contactResets++;
+        _contactStatus = status;
+    }
+
+    private void DisableContactScan(string status, string region)
+    {
+        SuspendContactScan(status);
+        _contactDisabled = true;
+        _contactGuardRegion = region;
+        _contactStatus = status;
+    }
+
+    private static byte ReadRamU8(ReadOnlySpan<byte> ram, uint address) =>
+        ram[RamOffset(ram, address, 1)];
+
+    private static ushort ReadRamU16(ReadOnlySpan<byte> ram, uint address)
+    {
+        int offset = RamOffset(ram, address, 2);
+        return (ushort)(ram[offset] | (ram[offset + 1] << 8));
+    }
+
+    private static uint ReadRamU32(ReadOnlySpan<byte> ram, uint address)
+    {
+        int offset = RamOffset(ram, address, 4);
+        return (uint)(ram[offset] | (ram[offset + 1] << 8) |
+            (ram[offset + 2] << 16) | (ram[offset + 3] << 24));
+    }
+
+    private static short ReadRamS16(ReadOnlySpan<byte> ram, uint address) =>
+        unchecked((short)ReadRamU16(ram, address));
+
+    private static int ReadRamS32(ReadOnlySpan<byte> ram, uint address) =>
+        unchecked((int)ReadRamU32(ram, address));
+
+    private static int RamOffset(ReadOnlySpan<byte> ram, uint address, int length)
+    {
+        int offset = checked((int)(address & 0x1FFFFFFF));
+        if (offset < 0 || length < 0 || offset > ram.Length - length)
+            throw new InvalidOperationException($"Protected RAM range is invalid: 0x{address:X8}+0x{length:X}");
+        return offset;
+    }
+
+    private static ulong HashRamRange(ReadOnlySpan<byte> ram, uint address, int length)
+    {
+        int offset = RamOffset(ram, address, length);
+        ulong hash = 14695981039346656037UL;
+        hash = (hash ^ address) * 1099511628211UL;
+        hash = (hash ^ (uint)length) * 1099511628211UL;
+        for (int i = 0; i < length; i++) hash = (hash ^ ram[offset + i]) * 1099511628211UL;
+        return hash;
     }
 
     private static bool WriteStageDrawEnvironment(RecompOne.Runtime.Gpu gpu, IMemory memory, uint buffer)
@@ -1114,6 +1418,7 @@ public sealed class CoopFeasibility : IMod
 
     private void InitializeProxy(IMemory memory)
     {
+        SuspendContactScan("PROXY");
         _proxyX = unchecked((int)memory.ReadU32(PlayerWorldXAddress)) << 16;
         _proxyY = unchecked((int)memory.ReadU32(PlayerWorldYAddress)) << 16;
         _velocityX = 0;
@@ -1187,6 +1492,7 @@ public sealed class CoopFeasibility : IMod
         _autoTestRuns = 0;
         _autoTestStatus = "idle";
         _visualConfirmed = false;
+        _contactVisualConfirmed = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
         _leftXMax = _leftYMax = _rightXMax = _rightYMax = 0;
         _proxyInitialized = false;
@@ -1210,6 +1516,20 @@ public sealed class CoopFeasibility : IMod
         _nativeSpriteStreak = 0;
         _nativeSpriteFlipSeenInStreak = false;
         _nativeSpriteStatus = "WAIT";
+        Array.Clear(_contactIdentities);
+        Array.Clear(_nextContactIdentities);
+        _contactBaselinePending = true;
+        _contactDisabled = false;
+        _contactOverlap = false;
+        _contactScanFrames = _contactSlotsScanned = _contactEligibleSamples = 0;
+        _contactOverlapSamples = _contactDamagingSamples = _contactStaySamples = 0;
+        _contactCurrent = _contactPeak = _contactEntries = _contactExits = _contactResets = 0;
+        _contactGuardChecks = _contactGuardFailures = 0;
+        _contactLastSlot = -1;
+        _contactLastEntityId = 0;
+        _contactOffsetX = _contactOffsetY = _contactHalfWidth = _contactHalfHeight = 0;
+        _contactGuardRegion = "none";
+        _contactStatus = "WAIT";
         _roomKnown = false;
         _roomStableFrames = 0;
         _transitionPending = false;
@@ -1231,6 +1551,7 @@ public sealed class CoopFeasibility : IMod
         _fatal = true;
         _enabled = false;
         _proxyInitialized = false;
+        SuspendContactScan("FATAL");
         _firstError = $"{subsystem}: {ex.GetType().Name}: {ex.Message}";
         Console.Error.WriteLine($"[CoopProbe] Circuit breaker: {_firstError}");
     }
@@ -1255,6 +1576,10 @@ public sealed class CoopFeasibility : IMod
         char render = _visualConfirmed && _renderSubmitted >= 60 ? 'P' : 'W';
         char nativeSprite = _visualConfirmed && _nativeSpriteSubmitted >= 60 &&
             _nativeSpriteStreak >= 60 && _nativeSpriteFlipSeenInStreak && _nativeSpriteStatus == "OK" ? 'P' : 'W';
+        char contact = _contactDisabled || _contactGuardFailures != 0 ? 'F' :
+            _contactScanFrames >= 120 && _contactSlotsScanned == _contactScanFrames * ContactSlotCount &&
+            _contactGuardChecks == _contactScanFrames && _contactEntries > 0 && _contactStaySamples > 0 &&
+            _contactExits > 0 && _contactDamagingSamples > 0 && _contactVisualConfirmed ? 'P' : 'W';
         char collision = _collisionDisabled || _collisionRestoreFailures != 0 ? 'F' :
             _collisionCalls >= 120 && _sawSolid && _sawEmpty && _groundContacts > 0 &&
             _wallCorrections > 0 && _ceilingCorrections > 0 ? 'P' : 'W';
@@ -1271,6 +1596,7 @@ public sealed class CoopFeasibility : IMod
                $"M={movement}:{_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16}/{Bool(_jumpObserved)} " +
                $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)}/D{_drawOtCalls}/H{Bool(GpuHle.Active)}{Bool(GpuHle.Backend?.Ready == true)} " +
                $"N={nativeSprite}:{_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks}/S{_nativeSpriteStreak}/F{Bool(_nativeSpriteFlipSeenInStreak)}/L{_nativeSpriteStatus} " +
+               $"B={contact}:F{_contactScanFrames}/S{_contactSlotsScanned}/E{_contactEligibleSamples}/O{_contactOverlapSamples}/C{_contactCurrent}/P{_contactPeak}/D{_contactDamagingSamples}/I{_contactEntries}/T{_contactStaySamples}/X{_contactExits}/R{_contactResets}/G{_contactGuardChecks},{_contactGuardFailures}/V{Bool(_contactVisualConfirmed)}/H{_contactOffsetX},{_contactOffsetY},{_contactHalfWidth},{_contactHalfHeight}/Q{_contactGuardRegion}/L{_contactStatus} " +
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents} " +
                $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
@@ -1528,6 +1854,8 @@ public sealed class CoopFeasibility : IMod
     private void BeginTransition()
     {
         if (!_roomKnown) return;
+        SuspendContactScan("TRANS");
+        _contactVisualConfirmed = false;
         if (_awaitingPostTransitionMovement)
         {
             _awaitingPostTransitionMovement = false;
@@ -1562,7 +1890,8 @@ public sealed class CoopFeasibility : IMod
     }
 
     private string ErrorCode() => _fatal ? "X" : _collisionDisabled ?
-        (_collisionFunction != ExpectedCollisionFunction ? $"A{_collisionFunction:X8}" : $"C{_lastRejectedCorrection}") : "0";
+        (_collisionFunction != ExpectedCollisionFunction ? $"A{_collisionFunction:X8}" : $"C{_lastRejectedCorrection}") :
+        _contactDisabled ? (_contactGuardFailures > 0 ? "G" : "M") : "0";
 
     private enum AutoTestState
     {
@@ -1571,6 +1900,90 @@ public sealed class CoopFeasibility : IMod
         Running,
         Completed,
         Cancelled,
+    }
+
+    private readonly struct ContactShape
+    {
+        public readonly int CenterX;
+        public readonly int CenterY;
+        public readonly int HalfWidth;
+        public readonly int HalfHeight;
+        public readonly int WidescreenShift;
+
+        public ContactShape(int centerX, int centerY, int halfWidth, int halfHeight, int widescreenShift)
+        {
+            CenterX = centerX;
+            CenterY = centerY;
+            HalfWidth = halfWidth;
+            HalfHeight = halfHeight;
+            WidescreenShift = widescreenShift;
+        }
+    }
+
+    private readonly struct ContactScanResult
+    {
+        public readonly int Eligible;
+        public readonly int Overlaps;
+        public readonly int Damaging;
+        public readonly int Current;
+        public readonly int LastSlot;
+        public readonly ushort LastEntityId;
+
+        public ContactScanResult(int eligible, int overlaps, int damaging, int current,
+            int lastSlot, ushort lastEntityId)
+        {
+            Eligible = eligible;
+            Overlaps = overlaps;
+            Damaging = damaging;
+            Current = current;
+            LastSlot = lastSlot;
+            LastEntityId = lastEntityId;
+        }
+    }
+
+    private readonly struct ContactGuardSnapshot
+    {
+        private readonly ulong _entities;
+        private readonly ulong _playerRuntime;
+        private readonly ulong _status;
+        private readonly ulong _castleFlags;
+        private readonly ulong _castleMap;
+        private readonly ulong _saveWorkspace;
+
+        private ContactGuardSnapshot(ulong entities, ulong playerRuntime, ulong status,
+            ulong castleFlags, ulong castleMap, ulong saveWorkspace)
+        {
+            _entities = entities;
+            _playerRuntime = playerRuntime;
+            _status = status;
+            _castleFlags = castleFlags;
+            _castleMap = castleMap;
+            _saveWorkspace = saveWorkspace;
+        }
+
+        public static ContactGuardSnapshot Capture(ReadOnlySpan<byte> ram) => new(
+            HashRamRange(ram, Game.EntitiesAddr, Entity.Stride * 256),
+            HashRamRange(ram, ProtectedPlayerRuntimeAddress, ProtectedPlayerRuntimeLength),
+            HashRamRange(ram, ProtectedStatusAddress, ProtectedStatusLength),
+            HashRamRange(ram, ProtectedCastleFlagsAddress, ProtectedCastleFlagsLength),
+            HashRamRange(ram, ProtectedCastleMapAddress, ProtectedCastleMapLength),
+            HashRamRange(ram, ProtectedSaveWorkspaceAddress, ProtectedSaveWorkspaceLength));
+
+        public bool Matches(ContactGuardSnapshot other) =>
+            _entities == other._entities && _playerRuntime == other._playerRuntime &&
+            _status == other._status && _castleFlags == other._castleFlags &&
+            _castleMap == other._castleMap && _saveWorkspace == other._saveWorkspace;
+
+        public string FirstDifference(ContactGuardSnapshot other)
+        {
+            if (_entities != other._entities) return "entities";
+            if (_playerRuntime != other._playerRuntime) return "player";
+            if (_status != other._status) return "status";
+            if (_castleFlags != other._castleFlags) return "flags";
+            if (_castleMap != other._castleMap) return "map";
+            if (_saveWorkspace != other._saveWorkspace) return "save";
+            return "unknown";
+        }
     }
 
     private readonly struct CollisionResult

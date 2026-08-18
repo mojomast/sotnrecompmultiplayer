@@ -1,8 +1,8 @@
 {
   "id": "coop-feasibility",
   "name": "Co-op Feasibility Probe",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "mojomast",
-  "description": "Tests controller 2 input, proxy movement, terrain collision, native sprite replay, room transitions, and entity capacity without changing persistent game state.",
+  "description": "Tests controller 2 input, proxy movement, terrain collision, native sprite replay, and read-only enemy contact detection without changing persistent game state.",
   "dependencies": []
 }
