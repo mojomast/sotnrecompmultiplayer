@@ -111,21 +111,16 @@ public sealed class CoopFeasibility : IMod
     private const int FootOffset = 25;
     private const int ColliderSize = 0x24;
     private const int CollisionStackDepth = 0xD0;
-    private const int CoyoteWindowUpdates = 4;
-    private const int JumpBufferUpdates = 4;
     private const int ReconstructionStableUpdates = 3;
     private const int MinimumPlayerSeparation = 24;
-    private const int AttackStartupUpdates = 8;
-    private const int AttackActiveUpdates = 4;
-    private const int AttackRecoveryUpdates = 10;
     private const int ProjectileLifetimeUpdates = 40;
     private const int ProjectileSpeed = 4 * FixedOne;
     private const int ProjectileMaximumRange = 160;
     private const int AwarenessHysteresisSquared = 64;
-    private const int ManagedMaxHp = 100;
-    private const int DamageInvulnerabilityUpdates = 60;
-    private const int HurtLockUpdates = 18;
-    private const int ReviveUpdates = 120;
+    private const int ManagedMaxHp = ManagedHealthMachine.MaximumHp;
+    private const int DamageInvulnerabilityUpdates = ManagedHealthMachine.DamageInvulnerabilityUpdates;
+    private const int HurtLockUpdates = ManagedHealthMachine.HurtLockUpdates;
+    private const int ReviveUpdates = ManagedHealthMachine.ReviveUpdates;
     private const uint EffectSolid = 0x0001;
     private const uint EffectSolidFromAbove = 0x0040;
     private const uint EffectSolidFromBelow = 0x0080;
@@ -151,8 +146,10 @@ public sealed class CoopFeasibility : IMod
     private string _safeReason = "Waiting for gameplay";
     private string _operationStatus = "Waiting for gameplay";
     private int _diagnosticGeneration;
-    private int _proxyResetRequests;
-    private int _proxyResetCompletions;
+    private readonly string _diagnosticSessionId = Guid.NewGuid().ToString("N");
+    private long _diagnosticFrame;
+    private int _proxyResetRequests => _movementSession.State.ManualResetRequests;
+    private int _proxyResetCompletions => _movementSession.State.ManualResetCompletions;
 
     private long _vsyncCalls;
     private long _mainEngineCalls;
@@ -171,6 +168,7 @@ public sealed class CoopFeasibility : IMod
     private bool _neutralSeen;
     private bool _previousConnected;
     private int _connectionChanges;
+    private readonly Pad2SourceAvailability _pad2Source = new();
     private byte _leftXMin = 0xFF;
     private byte _leftXMax;
     private byte _leftYMin = 0xFF;
@@ -194,7 +192,7 @@ public sealed class CoopFeasibility : IMod
     private int _autoTestRuns;
     private string _autoTestStatus = "idle";
 
-    private bool _proxyInitialized;
+    private bool _proxyInitialized => _movementSession.State.ProxyInitialized;
     private int _proxyX;
     private int _proxyY;
     private int _velocityX;
@@ -207,16 +205,17 @@ public sealed class CoopFeasibility : IMod
     private bool _jumpPending;
     private int _jumpStartY;
     private bool _collisionThisFrame;
-    private bool _reinitializeRequested;
-    private ProxyLocomotion _locomotion;
-    private ProxyAnimation _animation;
-    private int _animationFrame;
-    private int _animationTick;
-    private int _animationTransitions;
-    private long _animationAdvances;
-    private int _animationStatesSeen;
-    private int _animationAdvanceStatesSeen;
-    private bool _animationStateValid;
+    private bool _reinitializeRequested => _movementSession.State.ManualResetPending;
+    private readonly ManagedLocomotionReducer _locomotionState = new();
+    private ManagedLocomotion _locomotion => _locomotionState.State.Locomotion;
+    private ManagedAnimation _animation => _locomotionState.State.Animation;
+    private int _animationFrame => _locomotionState.State.Frame;
+    private int _animationTick => _locomotionState.State.Tick;
+    private int _animationTransitions => _locomotionState.State.Transitions;
+    private long _animationAdvances => _locomotionState.State.Advances;
+    private int _animationStatesSeen => _locomotionState.State.StatesSeen;
+    private int _animationAdvanceStatesSeen => _locomotionState.State.AdvanceStatesSeen;
+    private bool _animationStateValid => _locomotionState.State.Valid;
     private long _ownedHurtboxSamples;
     private int _ownedHurtboxStatesSeen;
     private ulong _visualPosesSeen;
@@ -230,33 +229,39 @@ public sealed class CoopFeasibility : IMod
     private bool _poseTableValidated;
     private ushort _independentNativeFrame;
     private string _independentVisualStatus = "WAIT";
-    private int _coyoteUpdates;
-    private int _jumpBufferUpdates;
+    private readonly JumpForgivenessReducer _jumpForgiveness = new();
+    private int _coyoteUpdates => _jumpForgiveness.CoyoteUpdates;
+    private int _jumpBufferUpdates => _jumpForgiveness.BufferUpdates;
     private int _normalJumps;
     private int _coyoteJumps;
     private int _bufferedJumps;
-    private bool _crouched;
-    private bool _standBlocked;
+    private readonly ManagedStanceReducer _stance = new();
+    private readonly ReconstructionPolicyReducer _reconstructionPolicy = new();
+    private bool _crouched => _stance.Crouched;
+    private bool _standBlocked => _stance.StandBlocked;
     private bool _landedThisUpdate;
     private bool _horizontalCommandThisUpdate;
-    private int _reconstructionSafeFrames;
-    private int _reconstructionAttempts;
-    private int _reconstructionSuccesses;
-    private int _reconstructionFailures;
-    private int _tetherRecoveries;
-    private bool _reconstructionHardFailure;
+    private int _reconstructionSafeFrames => _movementSession.State.SafeUpdates;
+    private int _reconstructionAttempts => _movementSession.State.ReconstructionAttempts;
+    private int _reconstructionSuccesses => _movementSession.State.ReconstructionSuccesses;
+    private int _reconstructionFailures => _movementSession.State.ReconstructionFailures;
+    private int _tetherRecoveries => _movementSession.State.TetherRecoveries;
+    private bool _reconstructionHardFailure => _movementSession.State.ReconstructionHardFailure;
     private string _reconstructionStatus = "WAIT";
 
     private int _attackTimer;
     private bool _attackSpawnPending;
     private bool _outgoingAttackDisabled;
     private bool _attackHardFailure;
-    private int _ownedAttackSlot = -1;
-    private uint _ownedAttackGeneration;
-    private uint _ownedAttackRoomHash;
-    private int _attackQuarantineSlot = -1;
-    private uint _attackQuarantineGeneration;
-    private uint _attackQuarantineRoomHash;
+    private AttackLeaseState _attackLease = AttackLeaseMachine.Initial();
+    private AttackPublicationState _attackPublication = AttackPublicationPolicy.Initial();
+    private readonly NativeAttackPublicationAdapter _attackPublicationAdapter;
+    private ref int _ownedAttackSlot => ref _attackLease.OwnedSlot;
+    private ref uint _ownedAttackGeneration => ref _attackLease.OwnedGeneration;
+    private ref uint _ownedAttackRoomHash => ref _attackLease.OwnedRoomHash;
+    private ref int _attackQuarantineSlot => ref _attackLease.QuarantineSlot;
+    private ref uint _attackQuarantineGeneration => ref _attackLease.QuarantineGeneration;
+    private ref uint _attackQuarantineRoomHash => ref _attackLease.QuarantineRoomHash;
     private long _attackAllocations;
     private long _attackNormalEngineWindows;
     private long _attackCleanups;
@@ -267,20 +272,17 @@ public sealed class CoopFeasibility : IMod
     private int _attackHitFlagObservations;
     private int _attackCooldownObservations;
     private int _attackTargetHpChanges;
-    private readonly uint[] _attackTargetAddresses = new uint[16];
-    private readonly ulong[] _attackTargetIdentities = new ulong[16];
-    private readonly short[] _attackTargetHpBefore = new short[16];
-    private readonly byte[] _attackTargetCooldownBefore = new byte[16];
-    private int _attackTargetCount;
+    private readonly AttackTargetCaptureState _attackTargets = new();
+    private int _attackTargetCount => _attackTargets.Count;
     private bool _attackWindowObserved;
-    private bool _attackCleanupPending;
-    private bool _attackQuarantineMutationStopped;
+    private ref bool _attackCleanupPending => ref _attackLease.CleanupPending;
+    private ref bool _attackQuarantineMutationStopped => ref _attackLease.MutationStopped;
     private long _attackArmMainGeneration;
     private long _attackArmUpdateGeneration;
     private long _attackObservedMainGeneration;
     private int _attackTimingFailures;
     private int _attackCausalResults;
-    private int _attackPhaseCompletionMask;
+    private int _attackPhaseCompletionMask => _locomotionState.State.AttackPhaseCompletionMask;
     private string _attackStatus = "IDLE";
     private AttackProfile _latchedAttackProfile;
     private bool _attackProfileLatched;
@@ -337,39 +339,10 @@ public sealed class CoopFeasibility : IMod
     private long _hudEligible;
     private long _hudSubmitted;
 
-    private readonly ulong[] _contactIdentities = new ulong[ContactSlotCount];
-    private readonly ulong[] _nextContactIdentities = new ulong[ContactSlotCount];
-    private readonly short[] _contactAttacks = new short[ContactSlotCount];
-    private readonly ulong[] _contactPhaseKeys = new ulong[ContactSlotCount];
-    private readonly ulong[] _nextContactPhaseKeys = new ulong[ContactSlotCount];
-    private readonly uint[] _contactGenerations = new uint[ContactSlotCount];
-    private readonly bool[] _contactWasEligible = new bool[ContactSlotCount];
-    private readonly bool[] _nextContactEligible = new bool[ContactSlotCount];
-    private readonly int[] _contactRepeatTicks = new int[ContactSlotCount];
-    private readonly short[] _nextContactAttacks = new short[ContactSlotCount];
-    private readonly ushort[] _nextContactElements = new ushort[ContactSlotCount];
-    private readonly short[] _nextContactCentersX = new short[ContactSlotCount];
-    private readonly short[] _nextContactCentersY = new short[ContactSlotCount];
-    private bool _contactBaselinePending = true;
-    private bool _contactSuspended;
-    private bool _contactResumeGracePending;
-    private int _contactResumeGraceBudget = 1;
-    private int _contactResumeGraceScans;
-    private int _contactContinuousSafeScans;
+    private readonly ContactObservation[] _contactObservations = new ContactObservation[ContactSlotCount];
+    private readonly ContactOpportunityMachine _contactOpportunities = new();
     private bool _contactDisabled;
-    private bool _contactOverlap;
     private bool _contactVisualConfirmed;
-    private long _contactScanFrames;
-    private long _contactSlotsScanned;
-    private long _contactEligibleSamples;
-    private long _contactOverlapSamples;
-    private long _contactDamagingSamples;
-    private long _contactStaySamples;
-    private int _contactCurrent;
-    private int _contactPeak;
-    private int _contactEntries;
-    private int _contactExits;
-    private int _contactResets;
     private int _contactGuardChecks;
     private int _contactGuardFailures;
     private int _contactLastSlot = -1;
@@ -381,26 +354,27 @@ public sealed class CoopFeasibility : IMod
     private int _contactShapeCenterX;
     private string _contactGuardRegion = "none";
     private string _contactStatus = "WAIT";
-    private int _managedHp = ManagedMaxHp;
-    private int _damageInvulnerability;
-    private int _hurtLock;
-    private bool _downed;
-    private int _damageEvents;
-    private int _damageConsumed;
-    private int _damageSuppressedInvul;
-    private int _damageSuppressedHitInvul;
-    private bool _hitInvulnerabilityActive;
-    private int _downedCount;
-    private int _reviveStarts;
-    private int _reviveCancels;
-    private int _reviveRecoveries;
-    private int _healthInvariantFailures;
-    private bool _compactHurt;
-    private int _lastDamage;
-    private int _lastDamageSlot = -1;
-    private ushort _lastDamageElement;
-    private int _reviveProgress;
-    private int _revives;
+    private ManagedHealthState _health = ManagedHealthMachine.Reset();
+    private ref int _managedHp => ref _health.Hp;
+    private ref int _damageInvulnerability => ref _health.Invulnerability;
+    private ref int _hurtLock => ref _health.HurtLock;
+    private ref bool _downed => ref _health.Downed;
+    private ref int _damageEvents => ref _health.DamageEvents;
+    private ref int _damageConsumed => ref _health.DamageConsumed;
+    private ref int _damageSuppressedInvul => ref _health.SuppressedInvulnerability;
+    private ref int _damageSuppressedHitInvul => ref _health.SuppressedHitInvulnerability;
+    private ref bool _hitInvulnerabilityActive => ref _health.HitInvulnerabilityActive;
+    private ref int _downedCount => ref _health.DownedCount;
+    private ref int _reviveStarts => ref _health.ReviveStarts;
+    private ref int _reviveCancels => ref _health.ReviveCancels;
+    private ref int _reviveRecoveries => ref _health.ReviveRecoveries;
+    private ref int _healthInvariantFailures => ref _health.InvariantFailures;
+    private ref bool _compactHurt => ref _health.CompactHurt;
+    private ref int _lastDamage => ref _health.LastDamage;
+    private ref int _lastDamageSlot => ref _health.LastDamageSlot;
+    private ref ushort _lastDamageElement => ref _health.LastDamageElement;
+    private ref int _reviveProgress => ref _health.ReviveProgress;
+    private ref int _revives => ref _health.Revives;
     private long _collisionCalls;
     private int _collisionRestoreFailures;
     private int _invalidCorrections;
@@ -418,17 +392,156 @@ public sealed class CoopFeasibility : IMod
     private string _collisionFailureReason = "none";
 
     private RoomIdentity _room;
-    private bool _roomKnown;
-    private int _roomStableFrames;
-    private bool _transitionPending;
-    private RoomIdentity _transitionOrigin;
-    private int _roomLayerEvents;
-    private int _completedTransitions;
-    private int _passedTransitions;
-    private int _postTransitionOriginX;
-    private long _postTransitionCommandedRaw;
-    private bool _awaitingPostTransitionMovement;
-    private bool _postTransitionMoved;
+    private bool _roomKnown => _movementSession.State.RoomKnown;
+    private int _roomStableFrames => _movementSession.State.RoomStableUpdates;
+    private bool _transitionPending => _movementSession.State.TransitionPending;
+    private int _roomLayerEvents => _movementSession.State.RoomLayerEvents;
+    private int _completedTransitions => _movementSession.State.CompletedTransitions;
+    private int _passedTransitions => _movementSession.State.PassedTransitions;
+    private readonly RoomEpochTracker _roomEpochTracker = new();
+    private readonly ManagedMovementSessionReducer _movementSession;
+    private long _postTransitionCommandedRaw => _movementSession.State.PostTransitionCommandedRaw;
+    private bool _awaitingPostTransitionMovement => _movementSession.State.AwaitingPostTransitionMovement;
+    private bool _postTransitionMoved => _movementSession.State.PostTransitionMoved;
+    private ManagedInputFrame _lastManagedInput;
+    private ManagedProxySnapshot _lastManagedSnapshot;
+    private ulong _lastManagedStateHash;
+    private long _managedSnapshotCount;
+    private long _managedUpdateId;
+
+    public CoopFeasibility()
+    {
+        _movementSession = new ManagedMovementSessionReducer(_roomEpochTracker);
+        _attackPublicationAdapter = new NativeAttackPublicationAdapter(this);
+    }
+
+    // This is the only bridge used by the attack publication policy. The policy itself has no
+    // dependency on guest memory or dispatch and this adapter is reused to keep windows allocation-free.
+    private sealed class NativeAttackPublicationAdapter : IAttackPublicationAdapter, IAttackTargetReadAdapter
+    {
+        private readonly CoopFeasibility _mod;
+        private IMemory _memory = null!;
+        private CpuContext _context = null!;
+        private AttackProfile _profile;
+        private uint _entity;
+
+        public NativeAttackPublicationAdapter(CoopFeasibility mod) => _mod = mod;
+
+        public void Bind(IMemory memory, uint entity, AttackProfile profile, CpuContext? context = null)
+        {
+            _memory = memory;
+            _entity = entity;
+            _profile = profile;
+            if (context != null) _context = context;
+        }
+
+        public AttackSlotObservation Probe(in AttackPublicationTuple tuple)
+        {
+            uint marker = _memory.ReadU32(_entity + 0x7C);
+            uint generation = _memory.ReadU32(_entity + 0x80);
+            uint roomHash = _memory.ReadU32(_entity + 0x84);
+            ushort id = _memory.ReadU16(_entity + EntityIdOffset);
+            uint update = _memory.ReadU32(_entity + EntityUpdateOffset);
+            ushort hitState = _memory.ReadU16(_entity + EntityHitboxStateOffset);
+            bool exact = marker == AttackMarker && generation == tuple.Generation && roomHash == tuple.RoomHash;
+            if (exact) return AttackSlotObservation.Exact;
+            bool free = id == 0 && update == 0 && hitState == 0;
+            return free ? AttackSlotObservation.Free : AttackSlotObservation.Reused;
+        }
+
+        public void ClearReservedSlot(in AttackPublicationTuple tuple)
+        {
+            for (uint offset = 0; offset < Entity.Stride; offset += 4) _memory.WriteU32(_entity + offset, 0);
+        }
+
+        public void WriteOwnershipField(in AttackPublicationTuple tuple, int field)
+        {
+            if (field == 0) _memory.WriteU32(_entity + 0x7C, AttackMarker);
+            else if (field == 1) _memory.WriteU32(_entity + 0x80, tuple.Generation);
+            else if (field == 2) _memory.WriteU32(_entity + 0x84, tuple.RoomHash);
+            else throw new ArgumentOutOfRangeException(nameof(field));
+        }
+
+        public void WritePayload(in AttackPublicationTuple tuple)
+        {
+            int scrollX = unchecked((int)_memory.ReadU32(ScrollXAddress)) >> 16;
+            int scrollY = unchecked((int)_memory.ReadU32(ScrollYAddress)) >> 16;
+            int worldX = _profile.Kind == AttackKind.Projectile ? _mod._projectileX : _mod._proxyX;
+            int worldY = _profile.Kind == AttackKind.Projectile ? _mod._projectileY : _mod._proxyY;
+            _memory.WriteU32(_entity, unchecked((uint)(((worldX >> 16) - scrollX) << 16)));
+            _memory.WriteU32(_entity + 0x04, unchecked((uint)(((worldY >> 16) - scrollY) << 16)));
+            _memory.WriteU16(_entity + EntityHitboxOffsetX, unchecked((ushort)(_profile.Kind == AttackKind.Projectile ? 0 : 14)));
+            _memory.WriteU16(_entity + EntityHitboxOffsetY, unchecked((ushort)(_profile.Kind == AttackKind.Projectile ? 0 : -8)));
+            _memory.WriteU16(_entity + EntityFacingOffset, (ushort)(_mod._facingLeft ? 1 : 0));
+            _memory.WriteU16(_entity + 0x2C, 1);
+            _memory.WriteU16(_entity + 0x32, _profile.Source);
+            _memory.WriteU32(_entity + EntityFlagsOffset, 0x00020000);
+            _memory.WriteU16(_entity + EntityAttackOffset, unchecked((ushort)_profile.Attack));
+            _memory.WriteU16(_entity + EntityAttackElementOffset, _profile.Element);
+            _memory.WriteU8(_entity + EntityHitboxWidthOffset, _profile.HalfWidth);
+            _memory.WriteU8(_entity + EntityHitboxHeightOffset, _profile.HalfHeight);
+            _memory.WriteU8(_entity + 0x49, _profile.InvincibilityFrames);
+            _memory.WriteU16(_entity + 0x58, _profile.StunFrames);
+            _memory.WriteU16(_entity + 0x6A, _profile.HitEffect);
+        }
+
+        public void WriteLiveField(in AttackPublicationTuple tuple, int field)
+        {
+            if (field == 0) _memory.WriteU16(_entity + EntityIdOffset, AttackEntityId);
+            else if (field == 1) _memory.WriteU32(_entity + EntityUpdateOffset, EntityNullAddress);
+            else if (field == 2) _memory.WriteU16(_entity + EntityHitboxStateOffset, _profile.HitState);
+            else throw new ArgumentOutOfRangeException(nameof(field));
+        }
+
+        public void CallGuest(in AttackPublicationTuple tuple)
+        {
+            uint function = _memory.ReadU32(AssignAttackerIdSlot);
+            _ = CpuContextGuardedDirectCall.Invoke(_context, _memory, function, _entity, 0, 0, 0);
+        }
+
+        public void ReadPostCall(in AttackPublicationTuple tuple)
+        {
+            _mod._attackLastAttackerId = _memory.ReadU16(_entity + EntityEnemyIdOffset);
+            _mod._attackAttackerIdValid = _mod._attackLastAttackerId is >= 0 and < 11;
+            if (!_mod._attackAttackerIdValid)
+                throw new InvalidOperationException($"attacker ID {_mod._attackLastAttackerId} is outside native cooldown bounds");
+            _mod.CaptureAttackTargets(this);
+        }
+
+        public void ObserveNative(in AttackPublicationTuple tuple) => _mod.ObserveAttackResult(this);
+
+        public void DeactivateLiveField(in AttackPublicationTuple tuple, int field)
+        {
+            if (field == 0) _memory.WriteU32(_entity + EntityUpdateOffset, 0);
+            else if (field == 1) _memory.WriteU16(_entity + EntityHitboxStateOffset, 0);
+            else if (field == 2) _memory.WriteU16(_entity + EntityIdOffset, 0);
+            else throw new ArgumentOutOfRangeException(nameof(field));
+        }
+
+        public void MutateProjectile(in AttackPublicationTuple tuple)
+        {
+            int scrollX = unchecked((int)_memory.ReadU32(ScrollXAddress)) >> 16;
+            int scrollY = unchecked((int)_memory.ReadU32(ScrollYAddress)) >> 16;
+            _memory.WriteU32(_entity, unchecked((uint)(((_mod._projectileX >> 16) - scrollX) << 16)));
+            _memory.WriteU32(_entity + 0x04, unchecked((uint)(((_mod._projectileY >> 16) - scrollY) << 16)));
+            _memory.WriteU8(_entity + 0x48, 0);
+            _memory.WriteU16(_entity + 0x44, 0);
+            _mod.CaptureAttackTargets(this);
+        }
+
+        public void ClearOwnedSlot(in AttackPublicationTuple tuple)
+        {
+            for (uint offset = 0; offset < Entity.Stride; offset += 4) _memory.WriteU32(_entity + offset, 0);
+        }
+
+        public int ReadScrollX() => unchecked((int)_memory.ReadU32(ScrollXAddress)) >> 16;
+        public int ReadScrollY() => unchecked((int)_memory.ReadU32(ScrollYAddress)) >> 16;
+        public uint TargetAddress(int slot) => Game.EntitiesAddr + (uint)(slot * Entity.Stride);
+        public byte ReadAttackU8(uint offset) => _memory.ReadU8(_entity + offset);
+        public byte ReadTargetU8(uint address, uint offset) => _memory.ReadU8(address + offset);
+        public ushort ReadTargetU16(uint address, uint offset) => _memory.ReadU16(address + offset);
+        public uint ReadTargetU32(uint address, uint offset) => _memory.ReadU32(address + offset);
+    }
 
     private int _slotSamples;
     private int _freePlayerCurrent;
@@ -441,6 +554,8 @@ public sealed class CoopFeasibility : IMod
 
     public void OnLoad()
     {
+        _pad2Source.Reset();
+        _movementSession.Load();
         _instance = this;
         Event.AddListener<VSyncEvent>(OnVSync);
         Event.AddListener<PadReadEvent>(OnPadRead);
@@ -454,23 +569,73 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
-            CancelOwnedAttack("UNLOAD");
+            UnloadOwnedAttack();
             ClearLatchedAttackProfile();
         }
         finally
         {
             if (ReferenceEquals(_instance, this)) _instance = null;
+            _pad2Source.Reset();
             _virtualPressed = 0;
             Event.RemoveListener<VSyncEvent>(OnVSync);
             Event.RemoveListener<PadReadEvent>(OnPadRead);
             Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
             Event.RemoveListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
-            _proxyInitialized = false;
-            _animationStateValid = false;
+            _movementSession.Unload();
+            _locomotionState.Invalidate();
             DisarmAwareness("UNLOAD");
             ClearJumpForgiveness();
             SuspendContactScan("UNLOAD");
         }
+    }
+
+    private void UnloadOwnedAttack()
+    {
+        AttackLeaseCommand request = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
+        if (request.Kind == AttackLeaseCommandKind.None) return;
+        if (RecompOne.Runtime.Runtime.Mem is not IMemory memory)
+        {
+            _ = AttackPublicationPolicy.Unload(ref _attackPublication, null, false);
+            StopResidualAttackMutation(request, "UNLOAD-RESIDUAL:NO-MEMORY");
+            return;
+        }
+
+        uint entity = Game.EntitiesAddr + (uint)(request.Lease.Slot * Entity.Stride);
+        _attackPublicationAdapter.Bind(memory, entity, _latchedAttackProfile);
+        AttackUnloadResult result = AttackPublicationPolicy.Unload(ref _attackPublication,
+            _attackPublicationAdapter, true);
+        if (result == AttackUnloadResult.Cleaned)
+        {
+            AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, request);
+            _attackCleanups++;
+            _attackLifecycleCancellations++;
+            _attackStatus = "CLEAN:UNLOAD";
+            ClearOwnedAttackMetadata(authorization);
+            return;
+        }
+
+        string evidence = result == AttackUnloadResult.OwnershipMismatch
+            ? "UNLOAD-RESIDUAL:MISMATCH"
+            : "UNLOAD-RESIDUAL:FAULT";
+        if (result == AttackUnloadResult.OwnershipMismatch)
+            StopQuarantinedMutation(request, evidence);
+        else
+            StopResidualAttackMutation(request, evidence);
+    }
+
+    public string CaptureAutomationDiagnostics(long automationFrame)
+    {
+        P2D4Report report = P2D4Report.Parse(BuildReport());
+        return P2D4DiagnosticsEnvelope.Serialize(report, _diagnosticSessionId, _diagnosticGeneration,
+            _diagnosticFrame, automationFrame);
+    }
+
+    public bool TryResetAutomationDiagnostics(string sessionId, int expectedGeneration)
+    {
+        if (!string.Equals(sessionId, _diagnosticSessionId, StringComparison.Ordinal) ||
+            expectedGeneration != _diagnosticGeneration)
+            return false;
+        return TryResetDiagnostic();
     }
 
     public void DrawSettings()
@@ -514,7 +679,8 @@ public sealed class CoopFeasibility : IMod
         if (ImGui.Checkbox("Require analog test (physical controller 2)", ref physicalController))
             _physicalControllerTest = physicalController;
 
-        if (ImGui.Button("Reset diagnostic")) ResetDiagnostic();
+        if (ImGui.Button("Reset diagnostic") && !TryResetDiagnostic())
+            Console.Error.WriteLine("[CoopProbe] Diagnostic reset refused: attack cleanup remains unresolved.");
         ImGui.SameLine();
         if (ImGui.Button("Reset proxy to Player 1")) QueueProxyReset();
         ImGui.SameLine();
@@ -560,15 +726,16 @@ public sealed class CoopFeasibility : IMod
         ImGui.Text($"Collision API: 0x{_collisionFunction:X8} | calls: {_collisionCalls} | restore failures: {_collisionRestoreFailures} | rejected corrections/unsupported suspensions: {_invalidCorrections}/{_unsupportedTerrainSuspensions}");
         ImGui.Text($"Avatar frames/eligible/DrawOTag: {_renderSubmitted}/{_renderEligible}/{_drawOtCalls} | HLE active/ready: {GpuHle.Active}/{GpuHle.Backend?.Ready == true}");
         ImGui.Text($"Native source confirmed/captured/eligible/opposite-facing/fallback: {_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks} | streak {_nativeSpriteStreak}, opposite {Bool(_nativeSpriteFlipSeenInStreak)} | {_nativeSpriteStatus}");
-        ImGui.Text($"Contact shadow current/peak/enter/stay/exit: {_contactCurrent}/{_contactPeak}/{_contactEntries}/{_contactStaySamples}/{_contactExits} | {_contactStatus}");
+        ImGui.Text($"Contact shadow current/peak/enter/stay/exit: {_contactOpportunities.Current}/{_contactOpportunities.Peak}/{_contactOpportunities.Entries}/{_contactOpportunities.StaySamples}/{_contactOpportunities.Exits} | {_contactStatus}");
         ImGui.Text($"Owned hurtbox offset {_contactOffsetX},{_contactOffsetY} half-size {_contactHalfWidth},{_contactHalfHeight} | last slot/id {_contactLastSlot}/{_contactLastEntityId}");
-        ImGui.Text($"Contact scans/slots/eligible/overlap/damaging: {_contactScanFrames}/{_contactSlotsScanned}/{_contactEligibleSamples}/{_contactOverlapSamples}/{_contactDamagingSamples} | resume grace {_contactResumeGraceScans}, budget {_contactResumeGraceBudget}");
+        ImGui.Text($"Contact scans/slots/eligible/overlap/damaging: {_contactOpportunities.ScanFrames}/{_contactOpportunities.SlotsScanned}/{_contactOpportunities.EligibleSamples}/{_contactOpportunities.OverlapSamples}/{_contactOpportunities.DamagingSamples} | resume grace {_contactOpportunities.ResumeGraceScans}, budget {_contactOpportunities.ResumeGraceBudget}");
         ImGui.Text($"HP {_managedHp}/{ManagedMaxHp} | invuln/hurt {_damageInvulnerability}/{_hurtLock} | damage {_damageEvents}, hit-suppressed {_damageSuppressedHitInvul} last {_lastDamage}@{_lastDamageSlot} elem 0x{_lastDamageElement:X} | revive {_reviveProgress}/{ReviveUpdates} ({_revives})");
         ImGui.Text($"Attack {_animation}/{_attackTimer} | slot/quarantine {_ownedAttackSlot}/{_attackQuarantineSlot} | alloc/normal-window/clean/fail {_attackAllocations}/{_attackNormalEngineWindows}/{_attackCleanups}/{_attackFailures} | id {_attackLastAttackerId} causal/hit/cooldown/hp {_attackCausalResults}/{_attackHitFlagObservations}/{_attackCooldownObservations}/{_attackTargetHpChanges} | {_attackStatus}");
         ImGui.Text($"Profile {(_attackProfileLatched ? _latchedAttackProfile.Kind : AttackKind.Contact)} item/attack/element/state {(_attackProfileLatched ? _latchedAttackProfile.Item : 0)}/{(_attackProfileLatched ? _latchedAttackProfile.Attack : 0)}/{(_attackProfileLatched ? _latchedAttackProfile.Element : 0):X}/{(_attackProfileLatched ? _latchedAttackProfile.HitState : 0):X} | extract/failed/restore {_profileExtractions}/{_profileExtractionFailures}/{_equipmentRestoreChecks},{_equipmentRestoreFailures} | projectile windows {_projectileWindows}");
         ImGui.Text($"Enemies scans/native/compatible {_enemyDiagnosticScans}/{_enemyNativeCandidateSamples}/{_enemyCompatibleCandidateSamples} | nearest slot/id/enemy/hp/dist {_nearestTargetSlot}/{_nearestTargetEntityId}/{_nearestTargetEnemyId}/{_nearestTargetHp}/{_nearestTargetP1Distance},{_nearestTargetP2Distance} | hits/defeated/zero {_nativeTargetHits}/{_defeatedTargets}/{_compatibleZeroHpHits} | {_enemyDiagnosticStatus}");
         ImGui.Text($"CEN awareness calls/overrides/chosen {_awarenessCalls}/{_awarenessOverrides}/{_awarenessChosenSlot} | {_awarenessStatus} | HUD eligible/submitted {_hudEligible}/{_hudSubmitted}");
         ImGui.Text($"Reconstruction {_reconstructionStatus} stable {_reconstructionSafeFrames}/{ReconstructionStableUpdates} attempts/success/fail/tether {_reconstructionAttempts}/{_reconstructionSuccesses}/{_reconstructionFailures}/{_tetherRecoveries}");
+        ImGui.Text($"Replay epoch/update/snapshots/hash: {_roomEpochTracker.Epoch}/{_lastManagedInput.UpdateId}/{_managedSnapshotCount}/{_lastManagedStateHash:X16}");
         ImGui.Text($"Read-only guard checks/failures/region: {_contactGuardChecks}/{_contactGuardFailures}/{_contactGuardRegion}");
         ImGui.Text($"Collision contacts ground/wall/ceiling/one-way: {_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/{_oneWayContacts}");
         ImGui.Text($"Transitions passed/completed/layer events/post-move: {_passedTransitions}/{_completedTransitions}/{_roomLayerEvents}/{_postTransitionMoved}");
@@ -588,6 +755,7 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
+            _diagnosticFrame = e.Frame;
             _vsyncCalls++;
             if (!_virtualKeyboard && Controller.Connected2 != _previousConnected)
             {
@@ -634,6 +802,7 @@ public sealed class CoopFeasibility : IMod
                 }
             }
             _padState = e.Buttons;
+            _pad2Source.ObserveProcessed(_virtualKeyboard, e.Buttons);
             _padSeen |= (ushort)~e.Buttons;
             if (_virtualKeyboard && _virtualPressed == 0 && e.Buttons == 0xFFFF && ReadVirtualKeysDown() == 0)
             {
@@ -653,9 +822,9 @@ public sealed class CoopFeasibility : IMod
         {
             CancelAutomaticTest("player reloaded");
             ReleaseVirtualKeys();
-            _proxyInitialized = false;
-            _reconstructionSafeFrames = 0;
-            _animationStateValid = false;
+            _pad2Source.Reset();
+            _movementSession.PlayerReloaded();
+            _locomotionState.Invalidate();
             DisarmAwareness("PLAYER");
             ClearJumpForgiveness();
             ResetNativeSpriteFrame();
@@ -665,9 +834,6 @@ public sealed class CoopFeasibility : IMod
             CancelOwnedAttack("PLAYER");
             ClearLatchedAttackProfile();
             ResetManagedHealth();
-            _roomKnown = false;
-            _transitionPending = false;
-            _awaitingPostTransitionMovement = false;
             _safeReason = e.Character == PlayableCharacter.Alucard
                 ? "Player loaded; waiting for a stable room"
                 : "Unsupported character; use Alucard";
@@ -684,11 +850,9 @@ public sealed class CoopFeasibility : IMod
         {
             CancelAutomaticTest("room layer changed");
             ReleaseVirtualKeys();
-            _roomLayerEvents++;
             BeginTransition();
-            _proxyInitialized = false;
-            _reconstructionSafeFrames = 0;
-            _animationStateValid = false;
+            _movementSession.RoomLayerLoaded();
+            _locomotionState.Invalidate();
             DisarmAwareness("TRANS");
             ClearJumpForgiveness();
             ResetNativeSpriteFrame();
@@ -696,7 +860,6 @@ public sealed class CoopFeasibility : IMod
             SuspendContactScan("TRANS");
             CancelOwnedAttack("TRANS");
             ClearLatchedAttackProfile();
-            _roomStableFrames = 0;
             _visualConfirmed = false;
             _safeReason = $"Room layer event: stage 0x{e.StageId:X2}, layer {e.LayerIndex}";
         }
@@ -866,35 +1029,48 @@ public sealed class CoopFeasibility : IMod
         }
         if (!_enabled || !_safeFrame)
         {
-            _reconstructionSafeFrames = 0;
+            _movementSession.ObserveUnsafe();
             ClearJumpForgiveness();
             if (_reinitializeRequested)
                 _operationStatus = $"Proxy reset blocked: {_safeReason}";
             return;
         }
 
-        UpdateRoomIdentity(memory);
-        _reconstructionSafeFrames++;
-        if (_reinitializeRequested || !_proxyInitialized)
+        RoomIdentity observedRoom = ReadRoomIdentity(memory);
+        bool roomChanged = _roomKnown && !_room.Equals(observedRoom);
+        if (roomChanged) BeginTransition();
+        _room = observedRoom;
+        ManagedMovementSessionTransition movement = _movementSession.ObserveSafeRoom(observedRoom.ManagedKey());
+        if (roomChanged)
+        {
+            _locomotionState.Invalidate();
+            _reconstructionStatus = "ROOM";
+        }
+        if (movement.ReconstructionRequested)
         {
             bool requested = _reinitializeRequested;
-            if (_reconstructionSafeFrames < ReconstructionStableUpdates)
-            {
-                _reconstructionStatus = "STABILIZE";
-                return;
-            }
-            if (!TryReconstructProxy(context, memory, requested ? "RESET" : "ROOM"))
+            ReconstructionRunResult reconstruction = TryReconstructProxy(context, memory,
+                requested ? "RESET" : "ROOM", movement.Reconstruction);
+            if (reconstruction != ReconstructionRunResult.Selected)
+                _movementSession.CompleteReconstruction(movement.Reconstruction,
+                    reconstruction == ReconstructionRunResult.NoSafeCandidate
+                        ? ManagedMovementReconstructionResult.NoSafeCandidate
+                        : ManagedMovementReconstructionResult.AdapterFault);
+            if (reconstruction != ReconstructionRunResult.Selected)
             {
                 if (_collisionQueryFailed || _collisionDisabled) AbortCollisionFrame(memory);
                 return;
             }
-            _reinitializeRequested = false;
             if (requested)
             {
-                _proxyResetCompletions++;
                 _operationStatus = "Proxy reset completed beside Player 1";
             }
             else _operationStatus = "Proxy initialized beside Player 1";
+        }
+        else if (!_proxyInitialized)
+        {
+            _reconstructionStatus = _reconstructionHardFailure ? "NO_SAFE_CANDIDATE" : "STABILIZE";
+            return;
         }
         if (_transitionPending)
         {
@@ -916,36 +1092,39 @@ public sealed class CoopFeasibility : IMod
         _gameTapped = Game.Tapped2;
         ushort pressed = _gamePressed;
         ushort tapped = _gameTapped;
-        bool sourceAvailable = _virtualKeyboard || Controller.Connected2;
+        bool sourceAvailable = _pad2Source.IsAvailable(_virtualKeyboard, Controller.Connected2);
         bool sourceNeutral = _virtualKeyboard ? _virtualNeutralSeen : _neutralSeen;
         bool canControl = sourceAvailable && sourceNeutral;
+        _managedUpdateId = checked(_managedUpdateId + 1);
+        _lastManagedInput = new ManagedInputFrame(_managedUpdateId, _roomEpochTracker.Epoch,
+            pressed, tapped, canControl);
         int beforeX = _proxyX;
         bool commandedLeft = false;
         bool commandedRight = false;
         bool wasGrounded = _grounded;
-        bool jumpStarted = false;
-        bool coyoteRefreshed = false;
+        JumpForgivenessContinuation jumpContinuation;
         _landedThisUpdate = false;
         _horizontalCommandThisUpdate = false;
 
         UpdateRevive(memory, pressed, canControl);
 
-        if (canControl && !_downed && _hurtLock == 0 && _attackTimer == 0 && _ownedAttackSlot < 0)
+        bool canAct = canControl && !_downed && _hurtLock == 0 && _attackTimer == 0 && _ownedAttackSlot < 0;
+        ManagedStanceTransition stance = _stance.Observe(canAct, _grounded,
+            (pressed & (ushort)GameButton.Down) != 0);
+        if (stance.Command.Kind == ManagedStanceCommandKind.ProbeStandingHull)
+        {
+            if (!TryStandingHullClear(context, memory, _proxyX >> 16, _proxyY >> 16, out bool clear))
+            {
+                AbortCollisionFrame(memory);
+                return;
+            }
+            _stance.CompleteStandingProbe(stance.Command, clear);
+        }
+
+        if (canAct)
         {
             bool left = (pressed & (ushort)GameButton.Left) != 0;
             bool right = (pressed & (ushort)GameButton.Right) != 0;
-            bool wantsCrouch = _grounded && (pressed & (ushort)GameButton.Down) != 0;
-            if (wantsCrouch) _crouched = true;
-            else if (_crouched && _grounded)
-            {
-                if (!TryStandingHullClear(context, memory, _proxyX >> 16, _proxyY >> 16, out bool clear))
-                {
-                    AbortCollisionFrame(memory);
-                    return;
-                }
-                _standBlocked = !clear;
-                if (!_standBlocked) _crouched = false;
-            }
             commandedLeft = !_crouched && left && !right;
             commandedRight = !_crouched && right && !left;
             _horizontalCommandThisUpdate = commandedLeft || commandedRight;
@@ -953,20 +1132,19 @@ public sealed class CoopFeasibility : IMod
             if (_velocityX < 0) _facingLeft = true;
             else if (_velocityX > 0) _facingLeft = false;
 
-            if ((tapped & (ushort)GameButton.Cross) != 0)
-                _jumpBufferUpdates = JumpBufferUpdates;
-            if (!_crouched && _jumpBufferUpdates > 0 && (_grounded || _coyoteUpdates > 0))
+            JumpForgivenessTransition jump = _jumpForgiveness.BeginUpdate(
+                (tapped & (ushort)GameButton.Cross) != 0, _grounded, _crouched);
+            jumpContinuation = jump.Continuation;
+            if (jump.Request != JumpForgivenessRequest.None)
             {
-                JumpOrigin origin = _grounded ? JumpOrigin.Normal : JumpOrigin.Coyote;
-                BeginProxyJump(origin);
-                jumpStarted = true;
+                BeginProxyJump(jump.Request);
             }
             if (!_crouched && (tapped & (ushort)GameButton.Circle) != 0)
             {
                 _pendingAttackKind = (pressed & (ushort)GameButton.Up) != 0
                     ? AttackKind.Projectile : AttackKind.Contact;
                 _attackProfileLatched = false;
-                _attackTimer = AttackStartupUpdates + AttackActiveUpdates + AttackRecoveryUpdates;
+                _attackTimer = ManagedLocomotionCatalog.AttackTotalUpdates;
                 _attackStatus = "STARTUP";
                 _velocityX = 0;
             }
@@ -977,6 +1155,9 @@ public sealed class CoopFeasibility : IMod
                 _velocityX = ApproachZero(_velocityX, 0x04000);
             else _velocityX = 0;
             ClearJumpForgiveness();
+            // The legacy path cleared before physics but still ran walk-off initialization after
+            // grounded refresh, so advance an empty pre-physics phase to preserve that ordering.
+            jumpContinuation = _jumpForgiveness.BeginUpdate(false, _grounded, _crouched).Continuation;
         }
 
         if (!_grounded) _velocityY = Math.Min(MaxFallSpeed, _velocityY + Gravity);
@@ -989,61 +1170,43 @@ public sealed class CoopFeasibility : IMod
             return;
         }
         _landedThisUpdate = !wasGrounded && _grounded && _velocityY == 0;
-        if (!jumpStarted && wasGrounded && !_grounded)
+        JumpForgivenessTransition completedJump = _jumpForgiveness.CompleteUpdate(
+            jumpContinuation, _grounded);
+        if (completedJump.Request != JumpForgivenessRequest.None)
         {
-            _coyoteUpdates = CoyoteWindowUpdates;
-            coyoteRefreshed = true;
+            BeginProxyJump(completedJump.Request);
         }
-        if (!jumpStarted && _grounded && _jumpBufferUpdates > 0)
-        {
-            BeginProxyJump(JumpOrigin.Buffered);
-            jumpStarted = true;
-        }
-        UpdateProxyAnimation();
+        _locomotionState.Update(new ManagedLocomotionObservation(_downed, _hurtLock > 0, _compactHurt,
+            _attackTimer, _crouched, _grounded, _horizontalCommandThisUpdate, _velocityX, _velocityY,
+            _landedThisUpdate));
 
-        if (decrementInvulnerability && _damageInvulnerability > 0)
-        {
-            _damageInvulnerability--;
-            if (_damageInvulnerability == 0) _hitInvulnerabilityActive = false;
-        }
-        if (decrementHurtLock && _hurtLock > 0) _hurtLock--;
+        _health = ManagedHealthMachine.AdvanceTimers(_health, decrementInvulnerability, decrementHurtLock);
 
         if (_attackTimer > 0)
         {
-            _attackTimer--;
-            if (_attackTimer == AttackActiveUpdates + AttackRecoveryUpdates)
+            ManagedAttackAdvance attackAdvance = _locomotionState.AdvanceAttackCountdown(_attackTimer);
+            _attackTimer = attackAdvance.Timer;
+            if (attackAdvance.EnteredActive)
             {
-                _attackPhaseCompletionMask |= 1;
                 _attackSpawnPending = true;
                 _attackStatus = "ACTIVE";
-                SetProxyAnimation(ProxyLocomotion.Attacking, ProxyAnimation.AttackActive);
-                _animationTransitions++;
-                _animationStatesSeen |= 1 << (int)ProxyAnimation.AttackActive;
             }
-            else if (_attackTimer == AttackRecoveryUpdates)
+            else if (attackAdvance.EnteredRecovery)
             {
-                _attackPhaseCompletionMask |= 2;
                 _attackStatus = "RECOVERY";
-                SetProxyAnimation(ProxyLocomotion.Attacking, ProxyAnimation.AttackRecovery);
-                _animationTransitions++;
-                _animationStatesSeen |= 1 << (int)ProxyAnimation.AttackRecovery;
             }
-            else if (_attackTimer == 0)
+            else if (attackAdvance.Completed)
             {
-                _attackPhaseCompletionMask |= 4;
                 if (_ownedAttackSlot < 0) _attackStatus = "IDLE";
             }
         }
-
-        if (!jumpStarted && !coyoteRefreshed && !_grounded && _coyoteUpdates > 0) _coyoteUpdates--;
-        if (!jumpStarted && _jumpBufferUpdates > 0) _jumpBufferUpdates--;
 
         int deltaX = _proxyX - beforeX;
         if (commandedLeft && deltaX < 0) _leftDistanceRaw += -(long)deltaX;
         else if (commandedRight && deltaX > 0) _rightDistanceRaw += deltaX;
         if (_awaitingPostTransitionMovement &&
             ((commandedLeft && deltaX < 0) || (commandedRight && deltaX > 0)))
-            _postTransitionCommandedRaw += Math.Abs((long)deltaX);
+            _movementSession.ObservePostTransitionMovement(Math.Abs((long)deltaX));
 
         if (_jumpPending && _proxyY <= _jumpStartY - 4 * FixedOne)
         {
@@ -1051,22 +1214,22 @@ public sealed class CoopFeasibility : IMod
             _jumpPending = false;
         }
 
-        if (_awaitingPostTransitionMovement && _postTransitionCommandedRaw >= 8L * FixedOne)
-        {
-            _postTransitionMoved = true;
-            _awaitingPostTransitionMovement = false;
-            _passedTransitions++;
-        }
-
         int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
         int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
         ValidateManagedHealth();
         if (Math.Abs((_proxyX >> 16) - playerX) > 256 || Math.Abs((_proxyY >> 16) - playerY) > 192)
         {
-            _tetherRecoveries++;
             BeginReconstruction("TETHER");
             return;
         }
+
+        if (!_movementSession.SnapshotEligible) return;
+        _lastManagedSnapshot = new ManagedProxySnapshot(_managedUpdateId, _roomEpochTracker.Epoch,
+            _movementSession.State.Phase, _room.ManagedKey(), _proxyX, _proxyY, _velocityX, _velocityY, _proxyInitialized,
+            _grounded, _facingLeft, _crouched, _standBlocked, _coyoteUpdates, _jumpBufferUpdates,
+            (byte)_locomotion, (byte)_animation, _animationFrame, _animationTick);
+        _lastManagedStateHash = ManagedStateCodec.Hash(_lastManagedInput, _lastManagedSnapshot);
+        _managedSnapshotCount++;
 
     }
 
@@ -1081,16 +1244,14 @@ public sealed class CoopFeasibility : IMod
         BeginReconstruction(_collisionDisabled ? "COLLISION" : "TERRAIN");
     }
 
-    private void BeginProxyJump(JumpOrigin origin)
+    private void BeginProxyJump(JumpForgivenessRequest request)
     {
         _velocityY = JumpSpeed;
         _grounded = false;
         _jumpStartY = _proxyY;
         _jumpPending = true;
-        _jumpBufferUpdates = 0;
-        _coyoteUpdates = 0;
-        if (origin == JumpOrigin.Normal) _normalJumps++;
-        else if (origin == JumpOrigin.Coyote) _coyoteJumps++;
+        if (request == JumpForgivenessRequest.Normal) _normalJumps++;
+        else if (request == JumpForgivenessRequest.Coyote) _coyoteJumps++;
         else _bufferedJumps++;
     }
 
@@ -1098,65 +1259,33 @@ public sealed class CoopFeasibility : IMod
     {
         if (!_downed)
         {
-            if (_reviveProgress > 0) _reviveCancels++;
-            _reviveProgress = 0;
+            _health = ManagedHealthMachine.ApplyRevive(_health, false);
             return;
         }
         int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
         int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
-        bool buttons = (Game.Pressed & (ushort)GameButton.Down) != 0 &&
-            (player2Pressed & (ushort)GameButton.Circle) != 0;
-        bool nearby = Math.Abs((_proxyX >> 16) - playerX) <= 24 &&
-            Math.Abs((_proxyY >> 16) - playerY) <= 32;
         bool playerAlive = memory.ReadU32(PlayerEntityAddress + EntityUpdateOffset) != 0 &&
             (memory.ReadU32(PlayerEntityAddress + EntityFlagsOffset) & EntityDead) == 0;
         bool playerCompatible = Player.IsAlucard && Player.HasControl &&
             !Player.HasStatus(PlayerStatus.Transform | PlayerStatus.Dead);
-        if (!canControl || !buttons || !nearby || !playerAlive || !playerCompatible ||
-            !_roomKnown || !ReadRoomIdentity(memory).Equals(_room))
-        {
-            if (_reviveProgress > 0) _reviveCancels++;
-            _reviveProgress = 0;
-            return;
-        }
-        if (_reviveProgress == 0) _reviveStarts++;
-        if (++_reviveProgress < ReviveUpdates) return;
-        _managedHp = 50;
-        _downed = false;
-        _damageInvulnerability = 120;
-        _hitInvulnerabilityActive = false;
-        _hurtLock = 0;
-        _reviveProgress = 0;
-        _revives++;
-        if (_managedHp == 50 && _damageInvulnerability == 120) _reviveRecoveries++;
-        else _healthInvariantFailures++;
-        _animationStateValid = false;
+        var observation = new ManagedReviveObservation(canControl,
+            (Game.Pressed & (ushort)GameButton.Down) != 0,
+            (player2Pressed & (ushort)GameButton.Circle) != 0,
+            (_proxyX >> 16) - playerX, (_proxyY >> 16) - playerY,
+            playerAlive, playerCompatible, _roomKnown && ReadRoomIdentity(memory).Equals(_room));
+        bool wasDowned = _downed;
+        _health = ManagedHealthMachine.ApplyRevive(_health, observation);
+        if (wasDowned && !_downed) _locomotionState.Invalidate();
     }
 
     private void ResetManagedHealth()
     {
-        _managedHp = ManagedMaxHp;
-        _damageInvulnerability = 0;
-        _hurtLock = 0;
-        _downed = false;
-        _damageEvents = _damageConsumed = 0;
-        _damageSuppressedInvul = 0;
-        _damageSuppressedHitInvul = 0;
-        _hitInvulnerabilityActive = false;
-        _downedCount = _reviveStarts = _reviveCancels = _reviveRecoveries = 0;
-        _healthInvariantFailures = 0;
-        _compactHurt = false;
-        _lastDamage = 0;
-        _lastDamageSlot = -1;
-        _lastDamageElement = 0;
-        _reviveProgress = _revives = 0;
+        _health = ManagedHealthMachine.Reset();
     }
 
     private void ValidateManagedHealth()
     {
-        if (_managedHp is < 0 or > ManagedMaxHp || (_downed && _managedHp != 0) ||
-            (!_downed && _managedHp == 0) || _damageInvulnerability < 0 || _hurtLock < 0)
-            _healthInvariantFailures++;
+        _health = ManagedHealthMachine.Validate(_health);
     }
 
     private static int ApproachZero(int value, int amount) => value > 0
@@ -1165,8 +1294,7 @@ public sealed class CoopFeasibility : IMod
 
     private void ClearJumpForgiveness()
     {
-        _coyoteUpdates = 0;
-        _jumpBufferUpdates = 0;
+        _jumpForgiveness.Clear();
     }
 
     private bool MoveHorizontal(CpuContext context, IMemory memory)
@@ -1298,7 +1426,6 @@ public sealed class CoopFeasibility : IMod
         int screenX = worldX - scrollX;
         int screenY = worldY - scrollY;
 
-        var contextSnapshot = context.Snapshot();
         uint savedSp = context.SP;
         if (savedSp < 0x80010000 || savedSp >= 0x80200000)
             throw new InvalidOperationException($"Guest stack is outside RAM: 0x{savedSp:X8}");
@@ -1312,6 +1439,8 @@ public sealed class CoopFeasibility : IMod
         uint scratchStart = checked((uint)scratchStartValue);
         int scratchLength = checked((int)(scratchEndValue - scratchStartValue));
 
+        Span<uint> savedContext = stackalloc uint[CpuContextRegisterGuard.StateWordCount];
+        var contextGuard = new CpuContextRegisterGuard(context, savedContext);
         Span<byte> saved = stackalloc byte[scratchLength];
         int savedCount = 0;
         try
@@ -1324,7 +1453,7 @@ public sealed class CoopFeasibility : IMod
             }
 
             context.SP = temporarySp;
-            GameApi.CallApi(context, memory, GameApi.CheckCollisionAddr,
+            _ = CpuContextDirectCall.Invoke(context, memory, _collisionFunction,
                 unchecked((uint)screenX), unchecked((uint)screenY), output, 0);
             result = new CollisionResult(
                 memory.ReadU32(output),
@@ -1337,12 +1466,7 @@ public sealed class CoopFeasibility : IMod
         {
             try
             {
-                for (int i = 0; i < savedCount; i++) memory.WriteU8(scratchStart + (uint)i, saved[i]);
-                for (int i = 0; i < savedCount; i++)
-                {
-                    if (memory.ReadU8(scratchStart + (uint)i) == saved[i]) continue;
-                    throw new InvalidOperationException($"Collision scratch restore failed at byte {i}");
-                }
+                GuestScratchRestore.RestoreAll(memory, scratchStart, saved[..savedCount]);
             }
             catch
             {
@@ -1351,7 +1475,7 @@ public sealed class CoopFeasibility : IMod
             }
             finally
             {
-                context.Restore(contextSnapshot);
+                contextGuard.Restore();
             }
         }
 
@@ -1453,9 +1577,9 @@ public sealed class CoopFeasibility : IMod
                 DrawGpuTile(gpu, x - HalfWidth - 1, y + headOffset - 1, HalfWidth * 2 + 2,
                     FootOffset - headOffset + 2, 0, 0, 0);
 
-                byte r = _contactOverlap ? (byte)255 : _collisionThisFrame ? (byte)255 : (byte)32;
-                byte g = _contactOverlap ? (byte)48 : _grounded ? (byte)255 : (byte)192;
-                byte b = _contactOverlap ? (byte)160 : (byte)255;
+                byte r = _contactOpportunities.Current != 0 ? (byte)255 : _collisionThisFrame ? (byte)255 : (byte)32;
+                byte g = _contactOpportunities.Current != 0 ? (byte)48 : _grounded ? (byte)255 : (byte)192;
+                byte b = _contactOpportunities.Current != 0 ? (byte)160 : (byte)255;
                 DrawGpuTile(gpu, x - HalfWidth, y + headOffset, HalfWidth * 2,
                     FootOffset - headOffset, r, g, b);
                 DrawGpuTile(gpu, x + (_facingLeft ? -5 : 2), y - 6, 3, 3, 255, 232, 32);
@@ -1566,9 +1690,9 @@ public sealed class CoopFeasibility : IMod
         {
             UploadSprite(gpu, memory, proxySprite);
 
-            byte r = _contactOverlap ? (byte)255 : (byte)96;
-            byte g = _contactOverlap ? (byte)48 : (byte)176;
-            byte b = _contactOverlap ? (byte)160 : (byte)255;
+            byte r = _contactOpportunities.Current != 0 ? (byte)255 : (byte)96;
+            byte g = _contactOpportunities.Current != 0 ? (byte)48 : (byte)176;
+            byte b = _contactOpportunities.Current != 0 ? (byte)160 : (byte)255;
             uint color = 0x3C000000u | ((uint)b << 16) | ((uint)g << 8) | r;
             uint nextColor = ((uint)b << 16) | ((uint)g << 8) | r;
             byte u0 = _facingLeft ? checked((byte)(4 + proxySprite.Width - 1)) : (byte)4;
@@ -1906,13 +2030,7 @@ public sealed class CoopFeasibility : IMod
 
     private ContactScanResult ScanContactCandidates(ReadOnlySpan<byte> ram, ContactShape shape)
     {
-        Array.Clear(_nextContactIdentities);
-        Array.Clear(_nextContactAttacks);
-        Array.Clear(_nextContactElements);
-        Array.Clear(_nextContactCentersX);
-        Array.Clear(_nextContactCentersY);
-        Array.Clear(_nextContactPhaseKeys);
-        Array.Clear(_nextContactEligible);
+        Array.Clear(_contactObservations);
         int eligible = 0;
         int overlaps = 0;
         int damaging = 0;
@@ -1975,7 +2093,8 @@ public sealed class CoopFeasibility : IMod
                 }
             }
             if ((state & 1) == 0) continue;
-            _nextContactEligible[i] = true;
+            _contactObservations[i] = new ContactObservation(true, false, entityId, 0, update,
+                state, 0, 0, 0, 0);
             eligible++;
 
             if (Math.Abs(centerX - shape.CenterX) >= halfWidth + shape.HalfWidth ||
@@ -1983,18 +2102,13 @@ public sealed class CoopFeasibility : IMod
                 continue;
 
             ushort enemyId = ReadRamU16(ram, entity + EntityEnemyIdOffset);
-            ulong identity = ((ulong)update << 32) | ((ulong)enemyId << 16) | entityId;
-            _nextContactIdentities[i] = identity;
             overlaps++;
             current++;
             short attack = ReadRamS16(ram, entity + EntityAttackOffset);
             if (attack > 0) damaging++;
-            _nextContactAttacks[i] = attack;
             ushort element = ReadRamU16(ram, entity + EntityAttackElementOffset);
-            _nextContactElements[i] = element;
-            _nextContactPhaseKeys[i] = ((ulong)(ushort)attack << 32) | ((ulong)element << 16) | state;
-            _nextContactCentersX[i] = checked((short)centerX);
-            _nextContactCentersY[i] = checked((short)centerY);
+            _contactObservations[i] = new ContactObservation(true, true, entityId, enemyId, update,
+                state, attack, element, checked((short)centerX), checked((short)centerY));
             lastSlot = slot;
             lastEntityId = entityId;
         }
@@ -2013,179 +2127,47 @@ public sealed class CoopFeasibility : IMod
 
     private void CommitContactScan(ContactScanResult result)
     {
-        _contactScanFrames++;
-        _contactSlotsScanned += ContactSlotCount;
-        _contactEligibleSamples += result.Eligible;
-        _contactOverlapSamples += result.Overlaps;
-        _contactDamagingSamples += result.Damaging;
         if (result.LastSlot >= 0)
         {
             _contactLastSlot = result.LastSlot;
             _contactLastEntityId = result.LastEntityId;
         }
-
-        for (int i = 0; i < ContactSlotCount; i++)
-        {
-            if (_contactWasEligible[i] && !_nextContactEligible[i]) _contactGenerations[i]++;
-            if (_nextContactIdentities[i] != 0)
-                _nextContactIdentities[i] ^= (ulong)_contactGenerations[i] * 0x9E3779B97F4A7C15UL;
-            _contactWasEligible[i] = _nextContactEligible[i];
-        }
-
-        bool resumeGrace = _contactSuspended && _contactResumeGracePending;
-        _contactSuspended = false;
-        _contactResumeGracePending = false;
-        if (_contactBaselinePending)
-        {
-            Array.Copy(_nextContactIdentities, _contactIdentities, ContactSlotCount);
-            Array.Copy(_nextContactAttacks, _contactAttacks, ContactSlotCount);
-            Array.Copy(_nextContactPhaseKeys, _contactPhaseKeys, ContactSlotCount);
-            Array.Clear(_contactRepeatTicks);
-            _contactBaselinePending = false;
-        }
-        else if (resumeGrace)
-        {
-            Array.Copy(_nextContactIdentities, _contactIdentities, ContactSlotCount);
-            Array.Copy(_nextContactAttacks, _contactAttacks, ContactSlotCount);
-            Array.Copy(_nextContactPhaseKeys, _contactPhaseKeys, ContactSlotCount);
-            for (int i = 0; i < ContactSlotCount; i++)
-            {
-                _contactRepeatTicks[i] = _nextContactIdentities[i] != 0 && _nextContactAttacks[i] > 0
-                    ? DamageInvulnerabilityUpdates - 1 : 0;
-            }
-            _contactResumeGraceBudget = 0;
-            _contactResumeGraceScans++;
-        }
-        else
-        {
-            int winner = -1;
-            int winnerDamage = 0;
-            for (int i = 0; i < ContactSlotCount; i++)
-            {
-                ulong previous = _contactIdentities[i];
-                ulong current = _nextContactIdentities[i];
-                short previousAttack = _contactAttacks[i];
-                short currentAttack = _nextContactAttacks[i];
-                ulong previousPhase = _contactPhaseKeys[i];
-                ulong currentPhase = _nextContactPhaseKeys[i];
-                bool opportunity = false;
-                if (previous == current)
-                {
-                    if (current != 0)
-                    {
-                        _contactStaySamples++;
-                        if (currentAttack > 0 && (previousAttack <= 0 || currentPhase != previousPhase))
-                        {
-                            opportunity = true;
-                            _contactRepeatTicks[i] = 0;
-                        }
-                        else if (currentAttack > 0 && previousAttack > 0 &&
-                            ++_contactRepeatTicks[i] >= DamageInvulnerabilityUpdates)
-                        {
-                            opportunity = true;
-                            _contactRepeatTicks[i] = 0;
-                        }
-                        else if (currentAttack <= 0) _contactRepeatTicks[i] = 0;
-                    }
-                    else _contactRepeatTicks[i] = 0;
-                }
-                else
-                {
-                    if (previous != 0) _contactExits++;
-                    if (current != 0)
-                    {
-                        _contactEntries++;
-                        opportunity = currentAttack > 0;
-                    }
-                    _contactRepeatTicks[i] = 0;
-                }
-                if (opportunity && currentAttack > 0)
-                {
-                    _damageConsumed++;
-                    int damage = Math.Clamp(_nextContactAttacks[i], (short)1, (short)40);
-                    if (damage > winnerDamage)
-                    {
-                        winner = i;
-                        winnerDamage = damage;
-                    }
-                }
-                _contactIdentities[i] = current;
-                _contactAttacks[i] = currentAttack;
-                _contactPhaseKeys[i] = currentPhase;
-            }
-            if (winner >= 0)
-            {
-                if (_damageInvulnerability > 0)
-                {
-                    _damageSuppressedInvul++;
-                    if (_hitInvulnerabilityActive && !_downed) _damageSuppressedHitInvul++;
-                }
-                else if (!_downed) ApplyManagedDamage(winner, winnerDamage);
-            }
-        }
-
-        _contactCurrent = result.Current;
-        _contactPeak = Math.Max(_contactPeak, _contactCurrent);
-        _contactOverlap = _contactCurrent != 0;
-        if (++_contactContinuousSafeScans >= DamageInvulnerabilityUpdates)
-            _contactResumeGraceBudget = 1;
-        _contactStatus = _contactOverlap ? "CONTACT" : "OK";
+        ContactOpportunityTransition transition = _contactOpportunities.Advance(_contactObservations);
+        for (int index = 0; index < transition.OpportunityCount; index++)
+            _health = ManagedHealthMachine.ConsumeOpportunity(_health);
+        if (transition.HasWinner) ApplyManagedDamage(transition.Winner);
+        _contactStatus = _contactOpportunities.Current != 0 ? "CONTACT" : "OK";
     }
 
-    private void ApplyManagedDamage(int index, int damage)
+    private void ApplyManagedDamage(ContactDamageOpportunity opportunity)
     {
-        _managedHp = Math.Max(0, _managedHp - damage);
-        _damageInvulnerability = DamageInvulnerabilityUpdates;
-        _hurtLock = HurtLockUpdates;
-        _damageEvents++;
-        _lastDamage = damage;
-        _lastDamageSlot = ContactSlotStart + index;
-        _lastDamageElement = _nextContactElements[index];
-        _velocityX = _nextContactCentersX[index] < _contactShapeCenterX ? 0x28000 : -0x28000;
+        ManagedDamageTransition transition = ManagedHealthMachine.ApplyIncomingHit(_health, opportunity.Damage,
+            ContactSlotStart + opportunity.Index, opportunity.Element, _crouched);
+        _health = transition.State;
+        if (!transition.Applied) return;
+        _velocityX = opportunity.CenterX < _contactShapeCenterX ? 0x28000 : -0x28000;
         _velocityY = -0x38000;
         _grounded = false;
         _attackTimer = 0;
         _attackSpawnPending = false;
         CancelOwnedAttack("HURT");
         _attackStatus = "CANCEL:HURT";
-        if (_managedHp == 0)
+        if (transition.Lethal)
         {
-            _hitInvulnerabilityActive = false;
-            _downed = true;
-            _downedCount++;
-            _hurtLock = 0;
-            _crouched = false;
-            _compactHurt = false;
-            _reviveProgress = 0;
-        }
-        else
-        {
-            _hitInvulnerabilityActive = true;
-            _compactHurt = _crouched;
+            _stance.ApplyLethalDamage();
         }
     }
 
     private void SuspendContactScan(string status)
     {
-        bool reset = !_contactBaselinePending || _contactCurrent != 0 || _contactOverlap;
-        bool newSuspension = !_contactSuspended;
-        Array.Clear(_nextContactIdentities);
-        Array.Clear(_nextContactEligible);
-        if (!_contactSuspended)
-        {
-            _contactSuspended = true;
-            _contactResumeGracePending = _contactResumeGraceBudget > 0 && !_contactBaselinePending;
-            _contactContinuousSafeScans = 0;
-        }
-        _contactCurrent = 0;
-        _contactOverlap = false;
+        _contactOpportunities.Suspend();
+        Array.Clear(_contactObservations);
         _nearestTargetSlot = -1;
         _nearestTargetEntityId = _nearestTargetEnemyId = 0;
         _nearestTargetHp = 0;
         _nearestTargetP1Distance = _nearestTargetP2Distance = 0;
         _nearestTargetCompatible = false;
         _enemyDiagnosticStatus = status == "WAIT" ? "WAIT" : status;
-        if (reset && newSuspension) _contactResets++;
         _contactStatus = status;
     }
 
@@ -2383,41 +2365,6 @@ public sealed class CoopFeasibility : IMod
 
     private static bool IsNativeTargetBody(ushort state) => (state & 0x3E) != 0;
 
-    private void UpdateRoomIdentity(IMemory memory)
-    {
-        RoomIdentity current = ReadRoomIdentity(memory);
-        if (!_roomKnown)
-        {
-            _room = current;
-            _roomKnown = true;
-            _roomStableFrames = 1;
-        }
-        else if (!_room.Equals(current))
-        {
-            BeginTransition();
-            _room = current;
-            _roomStableFrames = 1;
-            _proxyInitialized = false;
-            _animationStateValid = false;
-            _reconstructionSafeFrames = 0;
-            _reconstructionStatus = "ROOM";
-        }
-        else _roomStableFrames++;
-
-        if (_transitionPending && _roomStableFrames >= 30 && _proxyInitialized)
-        {
-            _transitionPending = false;
-            if (!_transitionOrigin.Equals(_room))
-            {
-                _completedTransitions++;
-                _postTransitionOriginX = _proxyX;
-                _postTransitionCommandedRaw = 0;
-                _awaitingPostTransitionMovement = true;
-                _postTransitionMoved = false;
-            }
-        }
-    }
-
     private static RoomIdentity ReadRoomIdentity(IMemory memory) => new(
         memory.ReadU8(Game.StageIdAddr),
         memory.ReadU8(Game.RoomAddr),
@@ -2427,56 +2374,198 @@ public sealed class CoopFeasibility : IMod
         unchecked((int)memory.ReadU32(RoomRightAddress)),
         unchecked((int)memory.ReadU32(RoomBottomAddress)));
 
-    private bool TryReconstructProxy(CpuContext context, IMemory memory, string reason)
+    private ReconstructionRunResult TryReconstructProxy(CpuContext context, IMemory memory, string reason,
+        ManagedMovementReconstructionContinuation continuation)
     {
         SuspendContactScan("RECON");
-        _reconstructionAttempts++;
         int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
         int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
-        ReadOnlySpan<int> xOffsets = [24, -24, 32, -32, 40, -40, 48, -48];
-        ReadOnlySpan<int> yOffsets = [0, -8, 8, -16, 16];
-        for (int yIndex = 0; yIndex < yOffsets.Length; yIndex++)
+        var adapter = new LiveReconstructionAdapter(this, context, memory, reason, continuation);
+        return ReconstructionPolicyOrchestration.Run(_reconstructionPolicy, playerX, playerY, ref adapter);
+    }
+
+    private struct LiveReconstructionAdapter : IReconstructionPolicyAdapter
+    {
+        private readonly CoopFeasibility _mod;
+        private readonly CpuContext _context;
+        private readonly IMemory _memory;
+        private readonly string _reason;
+        private readonly ManagedMovementReconstructionContinuation _continuation;
+        private int _preparedX;
+        private int _preparedY;
+        private bool _preparedCrouched;
+        private ReconstructionCandidate _preparedCandidate;
+        private bool _prepared;
+
+        public LiveReconstructionAdapter(CoopFeasibility mod, CpuContext context, IMemory memory, string reason,
+            ManagedMovementReconstructionContinuation continuation)
         {
-            for (int xIndex = 0; xIndex < xOffsets.Length; xIndex++)
-            {
-                int candidateX = playerX + xOffsets[xIndex];
-                int candidateY = playerY + yOffsets[yIndex];
-                if (Math.Abs(candidateX - playerX) < MinimumPlayerSeparation) continue;
-                for (int stance = 0; stance < 2; stance++)
-                {
-                    bool crouched = stance != 0;
-                    if (!ValidateReconstructionCandidate(context, memory, candidateX, candidateY, crouched))
-                    {
-                        if (_collisionQueryFailed || _collisionDisabled)
-                        {
-                            _reconstructionStatus = $"{reason}:COLLISION_SUSPEND";
-                            _proxyInitialized = false;
-                            return false;
-                        }
-                        continue;
-                    }
-                    InitializeProxyAt(candidateX, candidateY, crouched);
-                    ValidateAllProxyPoses(memory);
-                    _damageInvulnerability = _downed ? _damageInvulnerability :
-                        Math.Max(_damageInvulnerability, DamageInvulnerabilityUpdates);
-                    _reconstructionSuccesses++;
-                    _reconstructionHardFailure = false;
-                    _reconstructionStatus = $"{reason}:{(xOffsets[xIndex] < 0 ? 'L' : 'R')}{Math.Abs(xOffsets[xIndex])}/Y{yOffsets[yIndex]}/{(crouched ? 'C' : 'S')}";
-                    if (_awaitingPostTransitionMovement)
-                    {
-                        _postTransitionOriginX = _proxyX;
-                        _postTransitionCommandedRaw = 0;
-                    }
-                    return true;
-                }
-            }
+            _mod = mod;
+            _context = context;
+            _memory = memory;
+            _reason = reason;
+            _continuation = continuation;
+            _preparedX = _preparedY = 0;
+            _preparedCrouched = false;
+            _preparedCandidate = default;
+            _prepared = false;
         }
-        _reconstructionFailures++;
-        _reconstructionHardFailure = true;
-        _reconstructionStatus = $"{reason}:NO_SAFE_CANDIDATE";
-        _operationStatus = "Reconstruction suspended: no validated position beside Player 1";
-        _proxyInitialized = false;
-        return false;
+
+        public ReconstructionObservation ProbeCandidate(int worldX, int worldY, bool crouched)
+        {
+            if (_mod.ValidateReconstructionCandidate(_context, _memory, worldX, worldY, crouched))
+                return ReconstructionObservation.Valid;
+            return _mod._collisionQueryFailed || _mod._collisionDisabled
+                ? ReconstructionObservation.AdapterFault
+                : ReconstructionObservation.Blocked;
+        }
+
+        public void PrepareInitialization(int worldX, int worldY, bool crouched)
+        {
+            _preparedX = worldX;
+            _preparedY = worldY;
+            _preparedCrouched = crouched;
+            _prepared = true;
+        }
+
+        public void PreparePoseProjection()
+        {
+            if (!_prepared) throw new InvalidOperationException("Reconstruction initialization was not prepared.");
+        }
+
+        public void PrepareHealthProjection()
+        {
+            if (!_prepared) throw new InvalidOperationException("Reconstruction initialization was not prepared.");
+        }
+
+        public void PrepareSuccessDiagnostics(ReconstructionCandidate candidate)
+        {
+            if (!_prepared) throw new InvalidOperationException("Reconstruction was not prepared.");
+            _preparedCandidate = candidate;
+        }
+
+        public void CommitPreparedSuccess()
+        {
+            if (!_prepared) throw new InvalidOperationException("Reconstruction was not prepared.");
+            var commit = new LiveReconstructionCommitAdapter(_mod, _memory, _reason,
+                _preparedX, _preparedY, _preparedCrouched, _preparedCandidate, _continuation);
+            if (ManagedReconstructionCommitOrchestration.Run(ref commit) != ReconstructionRunResult.Selected)
+                throw new InvalidOperationException("Reconstruction commit preparation failed.");
+        }
+
+        public void CommitCollisionFault()
+        {
+            _mod._reconstructionStatus = $"{_reason}:COLLISION_SUSPEND";
+        }
+
+        public void CommitNoSafeCandidate()
+        {
+            _mod._reconstructionStatus = $"{_reason}:NO_SAFE_CANDIDATE";
+            _mod._operationStatus = "Reconstruction suspended: no validated position beside Player 1";
+        }
+    }
+
+    private struct LiveReconstructionCommitAdapter : IManagedReconstructionCommitAdapter
+    {
+        private readonly CoopFeasibility _mod;
+        private readonly IMemory _memory;
+        private readonly string _reason;
+        private readonly int _worldX;
+        private readonly int _worldY;
+        private readonly bool _crouched;
+        private readonly ReconstructionCandidate _candidate;
+        private readonly ManagedMovementReconstructionContinuation _continuation;
+        private int _proxyX;
+        private int _proxyY;
+        private ManagedStanceInitialization _stance;
+        private JumpForgivenessClearPreparation _jump;
+        private ManagedLocomotionInitialization _locomotion;
+        private ProxyPoseValidationProjection _pose;
+        private ManagedHealthState _health;
+        private ManagedMovementReconstructionCompletion _session;
+        private string? _status;
+
+        public LiveReconstructionCommitAdapter(CoopFeasibility mod, IMemory memory, string reason,
+            int worldX, int worldY, bool crouched, ReconstructionCandidate candidate,
+            ManagedMovementReconstructionContinuation continuation)
+        {
+            _mod = mod;
+            _memory = memory;
+            _reason = reason;
+            _worldX = worldX;
+            _worldY = worldY;
+            _crouched = crouched;
+            _candidate = candidate;
+            _continuation = continuation;
+            _proxyX = _proxyY = 0;
+            _stance = default;
+            _jump = default;
+            _locomotion = default;
+            _pose = default;
+            _health = mod._health;
+            _session = default;
+            _status = null;
+        }
+
+        public void PrepareScalars()
+        {
+            _proxyX = checked(_worldX * FixedOne);
+            _proxyY = checked(_worldY * FixedOne);
+        }
+
+        public void PrepareStance() => _stance = _mod._stance.PrepareInitialization(_crouched);
+        public void PrepareJump() => _jump = _mod._jumpForgiveness.PrepareClear();
+        public void PrepareLocomotion() => _locomotion = _mod._locomotionState.PrepareInitialization();
+        public void ValidatePoseProjection() => _pose = _mod.PrepareAllProxyPoses(_memory);
+        public void PrepareHealthProjection() => _health = ManagedHealthMachine.Reconstructed(_mod._health);
+        public void PrepareSessionCompletion() => _session = _mod._movementSession
+            .PrepareReconstructionCompletion(_continuation, ManagedMovementReconstructionResult.Selected);
+        public void PrepareDiagnostics() => _status =
+            $"{_reason}:{(_candidate.OffsetX < 0 ? 'L' : 'R')}{Math.Abs(_candidate.OffsetX)}/Y{_candidate.OffsetY}/{(_candidate.Crouched ? 'C' : 'S')}";
+
+        public bool CanCommit() => _status != null &&
+            _mod._stance.CanCommitInitialization(_stance) &&
+            _mod._jumpForgiveness.CanCommitClear(_jump) &&
+            _mod._locomotionState.CanCommitInitialization(_locomotion) &&
+            _mod._movementSession.CanCommitReconstructionCompletion(_session);
+
+        public bool CommitPrepared()
+        {
+            // CanCommit immediately precedes this synchronous publication. These reducer commits
+            // contain no fallible work and cannot fail without an intervening mutation.
+            _mod._attackTimer = 0;
+            _mod._attackSpawnPending = false;
+            _mod._proxyX = _proxyX;
+            _mod._proxyY = _proxyY;
+            _mod._velocityX = 0;
+            _mod._velocityY = 0;
+            _mod._grounded = true;
+            _mod._stance.CommitPreparedInitialization(_stance);
+            _mod._jumpPending = false;
+            _mod._jumpForgiveness.CommitPreparedClear(_jump);
+            _mod._locomotionState.CommitPreparedInitialization(_locomotion);
+            _mod.ApplyProxyPoseProjection(_pose);
+            _mod._health = _health;
+            _mod._reconstructionStatus = _status!;
+            _mod._movementSession.CommitPreparedReconstructionCompletion(_session);
+            return true;
+        }
+    }
+
+    private readonly struct ProxyPoseValidationProjection
+    {
+        public readonly bool TableValidated;
+        public readonly bool Disabled;
+        public readonly int Failures;
+        public readonly string Status;
+        public ProxyPoseValidationProjection(bool tableValidated, bool disabled, int failures,
+            string status)
+        {
+            TableValidated = tableValidated;
+            Disabled = disabled;
+            Failures = failures;
+            Status = status;
+        }
     }
 
     private bool ValidateReconstructionCandidate(CpuContext context, IMemory memory, int x, int y, bool crouched)
@@ -2497,189 +2586,39 @@ public sealed class CoopFeasibility : IMod
         return supported;
     }
 
-    private void InitializeProxyAt(int x, int y, bool crouched)
-    {
-        _attackTimer = 0;
-        _attackSpawnPending = false;
-        _proxyX = x << 16;
-        _proxyY = y << 16;
-        _velocityX = 0;
-        _velocityY = 0;
-        _grounded = true;
-        _crouched = crouched;
-        _standBlocked = false;
-        _jumpPending = false;
-        ClearJumpForgiveness();
-        _animationStateValid = false;
-        _animationFrame = 0;
-        _animationTick = 0;
-        _proxyInitialized = true;
-    }
-
     private void BeginReconstruction(string reason)
     {
         CancelOwnedAttack($"RECON:{reason}");
         ClearLatchedAttackProfile();
         DisarmAwareness("RECON");
         SuspendContactScan("RECON");
-        _proxyInitialized = false;
-        _animationStateValid = false;
+        _movementSession.BeginRecovery(reason == "TETHER"
+            ? ManagedMovementRecoveryKind.Tether : ManagedMovementRecoveryKind.Collision);
+        _locomotionState.Invalidate();
         _attackTimer = 0;
         _attackSpawnPending = false;
         _velocityX = _velocityY = 0;
-        _reconstructionSafeFrames = 0;
         _reconstructionStatus = reason;
         ClearJumpForgiveness();
     }
 
-    private void UpdateProxyAnimation()
-    {
-        ProxyLocomotion locomotion;
-        ProxyAnimation animation;
-        if (_downed)
-        {
-            locomotion = ProxyLocomotion.Downed;
-            animation = ProxyAnimation.Downed;
-        }
-        else if (_hurtLock > 0)
-        {
-            locomotion = ProxyLocomotion.Hurt;
-            animation = _compactHurt ? ProxyAnimation.CompactHurt : ProxyAnimation.Hurt;
-        }
-        else if (_attackTimer > 0)
-        {
-            locomotion = ProxyLocomotion.Attacking;
-            animation = _attackTimer > AttackActiveUpdates + AttackRecoveryUpdates
-                ? ProxyAnimation.AttackStartup
-                : _attackTimer > AttackRecoveryUpdates ? ProxyAnimation.AttackActive : ProxyAnimation.AttackRecovery;
-        }
-        else if (_crouched)
-        {
-            locomotion = ProxyLocomotion.Crouched;
-            animation = _animation == ProxyAnimation.CrouchEnter && IsOneShotInProgress(_animation)
-                ? ProxyAnimation.CrouchEnter
-                : _animation is ProxyAnimation.CrouchEnter or ProxyAnimation.CrouchHold
-                    ? ProxyAnimation.CrouchHold : ProxyAnimation.CrouchEnter;
-        }
-        else if (_animation is ProxyAnimation.CrouchEnter or ProxyAnimation.CrouchHold)
-        {
-            locomotion = _horizontalCommandThisUpdate ? ProxyLocomotion.Walk : ProxyLocomotion.Crouched;
-            animation = _horizontalCommandThisUpdate ? ProxyAnimation.Walk : ProxyAnimation.CrouchExit;
-        }
-        else if (_grounded && !_horizontalCommandThisUpdate &&
-            _animation == ProxyAnimation.CrouchExit && IsOneShotInProgress(_animation))
-        {
-            locomotion = ProxyLocomotion.Crouched;
-            animation = ProxyAnimation.CrouchExit;
-        }
-        else if (_grounded && !_horizontalCommandThisUpdate &&
-            _animation == ProxyAnimation.Landing && IsOneShotInProgress(_animation))
-        {
-            locomotion = ProxyLocomotion.Idle;
-            animation = ProxyAnimation.Landing;
-        }
-        else if (_landedThisUpdate && !_horizontalCommandThisUpdate)
-        {
-            locomotion = ProxyLocomotion.Idle;
-            animation = ProxyAnimation.Landing;
-        }
-        else if (_grounded)
-        {
-            locomotion = _velocityX == 0 ? ProxyLocomotion.Idle : ProxyLocomotion.Walk;
-            animation = _velocityX == 0 ? ProxyAnimation.Idle : ProxyAnimation.Walk;
-        }
-        else
-        {
-            locomotion = _velocityY < 0 ? ProxyLocomotion.Rising : ProxyLocomotion.Falling;
-            animation = _velocityY < 0 ? ProxyAnimation.JumpRise : ProxyAnimation.Fall;
-        }
+    private static int AnimationFrameCount(ManagedAnimation animation) =>
+        ManagedLocomotionCatalog.FrameCount(animation);
 
-        if (!_animationStateValid)
-        {
-            SetProxyAnimation(locomotion, animation);
-            _animationStateValid = true;
-        }
-        else if (_locomotion != locomotion || _animation != animation)
-        {
-            SetProxyAnimation(locomotion, animation);
-            _animationTransitions++;
-        }
-        else
-        {
-            _animationTick++;
-            if (!TryGetProxyPose(animation, _animationFrame, out ProxyPose pose))
-            {
-                _animationStateValid = false;
-                return;
-            }
-            if (_animationTick >= pose.Duration)
-            {
-                _animationTick = 0;
-                int count = AnimationFrameCount(animation);
-                if (_animationFrame + 1 < count) _animationFrame++;
-                else if (AnimationLoops(animation)) _animationFrame = 0;
-                else _animationTick = pose.Duration; // Hold the terminal pose; never modulo-loop a one-shot.
-                _animationAdvances++;
-                _animationAdvanceStatesSeen |= 1 << (int)animation;
-            }
-        }
-        _animationStatesSeen |= 1 << (int)animation;
-    }
-
-    private void SetProxyAnimation(ProxyLocomotion locomotion, ProxyAnimation animation)
-    {
-        _locomotion = locomotion;
-        _animation = animation;
-        _animationFrame = 0;
-        _animationTick = 0;
-    }
-
-    private static int AnimationFrameCount(ProxyAnimation animation) => animation switch
-    {
-        ProxyAnimation.Idle => 4,
-        ProxyAnimation.Walk => 8,
-        ProxyAnimation.JumpRise => 2,
-        ProxyAnimation.Fall => 2,
-        ProxyAnimation.Landing => 5,
-        ProxyAnimation.CrouchEnter => 13,
-        ProxyAnimation.CrouchHold => 1,
-        ProxyAnimation.CrouchExit => 2,
-        ProxyAnimation.Hurt => 1,
-        ProxyAnimation.CompactHurt => 1,
-        ProxyAnimation.AttackStartup => 1,
-        ProxyAnimation.AttackActive => 1,
-        ProxyAnimation.AttackRecovery => 1,
-        ProxyAnimation.Downed => 1,
-        _ => 1,
-    };
-
-    private static bool AnimationLoops(ProxyAnimation animation) =>
-        animation is ProxyAnimation.Idle or ProxyAnimation.Walk or ProxyAnimation.JumpRise or
-            ProxyAnimation.Fall or ProxyAnimation.CrouchHold or ProxyAnimation.Downed;
-
-    private bool IsOneShotInProgress(ProxyAnimation animation)
-    {
-        if (animation is not (ProxyAnimation.Landing or ProxyAnimation.CrouchEnter or ProxyAnimation.CrouchExit) ||
-            !TryGetProxyPose(animation, _animationFrame, out ProxyPose pose)) return false;
-        return _animationFrame + 1 < AnimationFrameCount(animation) || _animationTick < pose.Duration;
-    }
-
-    private static bool TryGetProxyPose(ProxyAnimation animation, int frame, out ProxyPose pose)
+    private static bool TryGetProxyPose(ManagedAnimation animation, int frame, out ProxyPose pose)
     {
         pose = default;
         ushort nativeFrame;
         ProxyHurtbox hurtbox;
         int index;
-        int duration;
         switch (animation)
         {
-            case ProxyAnimation.Idle when frame is >= 0 and < 4:
+            case ManagedAnimation.Idle when frame is >= 0 and < 4:
                 nativeFrame = (ushort)((frame & 1) == 0 ? 0x7A : 0x7B);
                 hurtbox = new ProxyHurtbox(0, 1, 4, 20);
                 index = frame;
-                duration = 12;
                 break;
-            case ProxyAnimation.Walk when frame is >= 0 and < 8:
+            case ManagedAnimation.Walk when frame is >= 0 and < 8:
                 ReadOnlySpan<ushort> walkFrames = [0x19, 0x1B, 0x1D, 0x1F, 0x21, 0x23, 0x25, 0x27];
                 nativeFrame = walkFrames[frame];
                 hurtbox = frame switch
@@ -2689,86 +2628,73 @@ public sealed class CoopFeasibility : IMod
                     _ => new ProxyHurtbox(5, -1, 8, 9),
                 };
                 index = 4 + frame;
-                duration = 4;
                 break;
-            case ProxyAnimation.JumpRise when frame is >= 0 and < 2:
+            case ManagedAnimation.JumpRise when frame is >= 0 and < 2:
                 nativeFrame = (ushort)(0x65 + frame);
                 hurtbox = new ProxyHurtbox(5, -5, 6, 12);
                 index = 12 + frame;
-                duration = 6;
                 break;
-            case ProxyAnimation.Fall when frame is >= 0 and < 2:
+            case ManagedAnimation.Fall when frame is >= 0 and < 2:
                 nativeFrame = (ushort)(0x6E + frame);
                 hurtbox = new ProxyHurtbox(0, -3, 4, 16);
                 index = 14 + frame;
-                duration = 6;
                 break;
-            case ProxyAnimation.Landing when frame is >= 0 and < 5:
+            case ManagedAnimation.Landing when frame is >= 0 and < 5:
                 ReadOnlySpan<ushort> landingFrames = [0x74, 0x75, 0x76, 0x77, 0x78];
                 ReadOnlySpan<int> landingBoxes = [4, 4, 2, 1, 1];
                 nativeFrame = landingFrames[frame];
                 hurtbox = Hurtbox(landingBoxes[frame]);
                 index = 16 + frame;
-                duration = 5;
                 break;
-            case ProxyAnimation.CrouchEnter when frame is >= 0 and < 13:
+            case ManagedAnimation.CrouchEnter when frame is >= 0 and < 13:
                 nativeFrame = (ushort)(frame == 0 ? 0x02 : 0x02 + frame);
                 hurtbox = Hurtbox(frame == 0 ? 2 : 3);
                 index = 21 + frame;
-                duration = frame == 0 ? 2 : 4;
                 break;
-            case ProxyAnimation.CrouchHold when frame == 0:
+            case ManagedAnimation.CrouchHold when frame == 0:
                 nativeFrame = 0x0F;
                 hurtbox = Hurtbox(3);
                 index = 34;
-                duration = 255;
                 break;
-            case ProxyAnimation.CrouchExit when frame is >= 0 and < 2:
+            case ManagedAnimation.CrouchExit when frame is >= 0 and < 2:
                 nativeFrame = (ushort)(0x11 + frame);
                 hurtbox = Hurtbox(frame == 0 ? 2 : 1);
                 index = 35 + frame;
-                duration = 3;
                 break;
-            case ProxyAnimation.Hurt when frame == 0:
+            case ManagedAnimation.Hurt when frame == 0:
                 nativeFrame = 0x9F;
                 hurtbox = Hurtbox(7);
                 index = 37;
-                duration = HurtLockUpdates;
                 break;
-            case ProxyAnimation.CompactHurt when frame == 0:
+            case ManagedAnimation.CompactHurt when frame == 0:
                 nativeFrame = 0x9F;
                 hurtbox = Hurtbox(3);
                 index = 42;
-                duration = HurtLockUpdates;
                 break;
-            case ProxyAnimation.AttackStartup when frame == 0:
+            case ManagedAnimation.AttackStartup when frame == 0:
                 nativeFrame = 0x7A;
                 hurtbox = Hurtbox(1);
                 index = 38;
-                duration = AttackStartupUpdates;
                 break;
-            case ProxyAnimation.AttackActive when frame == 0:
+            case ManagedAnimation.AttackActive when frame == 0:
                 nativeFrame = 0x7A;
                 hurtbox = Hurtbox(1);
                 index = 39;
-                duration = AttackActiveUpdates;
                 break;
-            case ProxyAnimation.AttackRecovery when frame == 0:
+            case ManagedAnimation.AttackRecovery when frame == 0:
                 nativeFrame = 0x7A;
                 hurtbox = Hurtbox(1);
                 index = 40;
-                duration = AttackRecoveryUpdates;
                 break;
-            case ProxyAnimation.Downed when frame == 0:
+            case ManagedAnimation.Downed when frame == 0:
                 nativeFrame = 0x9F;
                 hurtbox = Hurtbox(7);
                 index = 41;
-                duration = 255;
                 break;
             default:
                 return false;
         }
-        pose = new ProxyPose(index, duration, nativeFrame, hurtbox);
+        pose = new ProxyPose(index, nativeFrame, hurtbox);
         return true;
     }
 
@@ -2810,25 +2736,32 @@ public sealed class CoopFeasibility : IMod
         return true;
     }
 
-    private void ValidateAllProxyPoses(IMemory memory)
+    private ProxyPoseValidationProjection PrepareAllProxyPoses(IMemory memory)
     {
-        if (_poseTableValidated || _independentVisualDisabled) return;
-        for (int state = 0; state <= (int)ProxyAnimation.Downed; state++)
+        if (_poseTableValidated || _independentVisualDisabled)
+            return new ProxyPoseValidationProjection(_poseTableValidated, _independentVisualDisabled,
+                _independentVisualFailures, _independentVisualStatus);
+        for (int state = 0; state <= (int)ManagedAnimation.Downed; state++)
         {
-            ProxyAnimation animation = (ProxyAnimation)state;
+            ManagedAnimation animation = (ManagedAnimation)state;
             int count = AnimationFrameCount(animation);
             for (int frame = 0; frame < count; frame++)
             {
                 if (TryGetProxyPose(animation, frame, out ProxyPose pose) &&
                     TryResolveSprite(memory, pose.NativeFrame, out _)) continue;
-                _independentVisualDisabled = true;
-                _independentVisualFailures++;
-                _independentVisualStatus = $"MAP:{state}/{frame}";
-                return;
+                return new ProxyPoseValidationProjection(false, true,
+                    checked(_independentVisualFailures + 1), $"MAP:{state}/{frame}");
             }
         }
-        _poseTableValidated = true;
-        _independentVisualStatus = "VALID";
+        return new ProxyPoseValidationProjection(true, false, _independentVisualFailures, "VALID");
+    }
+
+    private void ApplyProxyPoseProjection(ProxyPoseValidationProjection projection)
+    {
+        _poseTableValidated = projection.TableValidated;
+        _independentVisualDisabled = projection.Disabled;
+        _independentVisualFailures = projection.Failures;
+        _independentVisualStatus = projection.Status;
     }
 
     private void SampleEntitySlots(IMemory memory)
@@ -2857,7 +2790,7 @@ public sealed class CoopFeasibility : IMod
         int hand = left != 0 ? 0 : 1;
         uint item = hand == 0 ? left : right;
         uint oppositeItem = hand == 0 ? right : left;
-        // Item 0x8D makes CalcAttack use GTE state, which CpuContext snapshots do not cover.
+        // Item 0x8D makes CalcAttack use GTE state, which the register guard does not cover.
         if (item >= Inventory.HandItemCount || oppositeItem >= Inventory.HandItemCount || item == 0x8D)
             return false;
 
@@ -2872,7 +2805,6 @@ public sealed class CoopFeasibility : IMod
         // Keep the deterministic template value instead of consuming native RNG for +0x30.
         ushort source = memory.ReadU16(definition + 0x30);
 
-        var snapshot = context.Snapshot();
         uint savedSp = context.SP;
         if (savedSp < 0x80010000 || savedSp >= 0x80200000) return false;
         uint temporarySp = (savedSp - 0x80u) & ~7u;
@@ -2881,52 +2813,68 @@ public sealed class CoopFeasibility : IMod
         if (scratchStart < 0x80010000 || scratchEnd > 0x80200000) return false;
         int scratchLength = checked((int)(scratchEnd - scratchStart));
         Span<byte> saved = stackalloc byte[scratchLength];
-        int savedCount = 0;
         bool callOk = true;
-        bool restoreOk = true;
-        try
+        int savedCount = 0;
+        Exception? restoreFailure = null;
+        if (type is not (6 or 10))
         {
-            for (int i = 0; i < scratchLength; i++)
+            callOk = CpuContextScratchDirectCall.TryInvoke(context, memory, ExpectedCalcAttack,
+                item, oppositeItem, temporarySp, scratchStart, saved,
+                out uint calculatedAttack, out savedCount, out restoreFailure);
+            if (callOk)
             {
-                saved[i] = memory.ReadU8(scratchStart + (uint)i);
-                savedCount++;
-                memory.WriteU8(scratchStart + (uint)i, 0);
-            }
-            context.SP = temporarySp;
-            if (type is not (6 or 10))
-            {
-                attack = unchecked((short)GameApi.Call(context, memory, ExpectedCalcAttack,
-                    item, oppositeItem));
-                if ((memory.ReadU32(0x80072F2C) & 0x4000) != 0) attack = (short)(attack >> 1);
+                try
+                {
+                    attack = unchecked((short)calculatedAttack);
+                    if ((memory.ReadU32(0x80072F2C) & 0x4000) != 0) attack = (short)(attack >> 1);
+                }
+                catch
+                {
+                    callOk = false;
+                }
             }
         }
-        catch
+        else
         {
-            callOk = false;
-        }
-        finally
-        {
+            Span<uint> savedContext = stackalloc uint[CpuContextRegisterGuard.StateWordCount];
+            var contextGuard = new CpuContextRegisterGuard(context, savedContext);
             try
             {
-                for (int i = 0; i < savedCount; i++) memory.WriteU8(scratchStart + (uint)i, saved[i]);
-                for (int i = 0; i < savedCount; i++)
-                    if (memory.ReadU8(scratchStart + (uint)i) != saved[i]) restoreOk = false;
-                if (savedCount != 0) _equipmentRestoreChecks++;
+                // Preserve the existing scratch clear/restore safety even when CalcAttack is skipped.
+                for (int i = 0; i < scratchLength; i++)
+                {
+                    saved[i] = memory.ReadU8(scratchStart + (uint)i);
+                    savedCount++;
+                    memory.WriteU8(scratchStart + (uint)i, 0);
+                }
+                context.SP = temporarySp;
             }
             catch
             {
-                restoreOk = false;
+                callOk = false;
             }
             finally
             {
-                context.Restore(snapshot);
+                try
+                {
+                    GuestScratchRestore.RestoreAll(memory, scratchStart, saved[..savedCount]);
+                }
+                catch (Exception ex)
+                {
+                    restoreFailure = ex;
+                }
+                finally
+                {
+                    contextGuard.Restore();
+                }
             }
         }
 
-        if (!restoreOk)
+        if (savedCount != 0) _equipmentRestoreChecks++;
+        if (restoreFailure is not null)
         {
             _equipmentRestoreFailures++;
-            throw new InvalidOperationException("equipment profile scratch restore failed");
+            throw restoreFailure;
         }
         uint stableLeft = memory.ReadU32(Game.StatusAddr + 0x29C);
         uint stableRight = memory.ReadU32(Game.StatusAddr + 0x2A0);
@@ -2992,87 +2940,55 @@ public sealed class CoopFeasibility : IMod
         }
 
         uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
-        uint generation = unchecked(_ownedAttackGeneration + 1);
-        if (generation == 0) generation = 1;
         uint roomHash = _room.StableHash();
-        bool completed = false;
-        _ownedAttackSlot = slot;
-        _ownedAttackGeneration = generation;
-        _ownedAttackRoomHash = roomHash;
-        try
+        _attackLease = AttackLeaseMachine.Reserve(_attackLease, slot, roomHash);
+        uint generation = _ownedAttackGeneration;
+        _projectileX = _projectileOriginX = _proxyX;
+        _projectileY = _proxyY - 8 * FixedOne;
+        _projectileLifetime = 0;
+        _attackPublicationAdapter.Bind(memory, entity, profile, context);
+        var publicationTuple = new AttackPublicationTuple(slot, generation, roomHash);
+        bool completed = AttackPublicationPolicy.Publish(ref _attackPublication, _attackPublicationAdapter,
+            publicationTuple, _mainEngineCalls, _updateCalls);
+        if (completed)
         {
-            // Clearing a predicate-verified free slot cannot publish an entity. Ownership is then
-            // published before any live field or guest call, allowing transactional rollback.
-            for (uint offset = 0; offset < Entity.Stride; offset += 4) memory.WriteU32(entity + offset, 0);
-            memory.WriteU32(entity + 0x7C, AttackMarker);
-            memory.WriteU32(entity + 0x80, generation);
-            memory.WriteU32(entity + 0x84, roomHash);
-
-            int scrollX = unchecked((int)memory.ReadU32(ScrollXAddress)) >> 16;
-            int scrollY = unchecked((int)memory.ReadU32(ScrollYAddress)) >> 16;
-            _projectileX = _projectileOriginX = _proxyX;
-            _projectileY = _proxyY - 8 * FixedOne;
-            _projectileLifetime = 0;
-            int worldX = profile.Kind == AttackKind.Projectile ? _projectileX : _proxyX;
-            int worldY = profile.Kind == AttackKind.Projectile ? _projectileY : _proxyY;
-            memory.WriteU32(entity, unchecked((uint)(((worldX >> 16) - scrollX) << 16)));
-            memory.WriteU32(entity + 0x04, unchecked((uint)(((worldY >> 16) - scrollY) << 16)));
-            memory.WriteU16(entity + EntityHitboxOffsetX,
-                unchecked((ushort)(profile.Kind == AttackKind.Projectile ? 0 : 14)));
-            memory.WriteU16(entity + EntityHitboxOffsetY,
-                unchecked((ushort)(profile.Kind == AttackKind.Projectile ? 0 : -8)));
-            memory.WriteU16(entity + EntityFacingOffset, (ushort)(_facingLeft ? 1 : 0));
-            memory.WriteU16(entity + 0x2C, 1);
-            memory.WriteU16(entity + 0x32, profile.Source);
-            memory.WriteU32(entity + EntityFlagsOffset, 0x00020000);
-            memory.WriteU16(entity + EntityAttackOffset, unchecked((ushort)profile.Attack));
-            memory.WriteU16(entity + EntityAttackElementOffset, profile.Element);
-            memory.WriteU8(entity + EntityHitboxWidthOffset, profile.HalfWidth);
-            memory.WriteU8(entity + EntityHitboxHeightOffset, profile.HalfHeight);
-            memory.WriteU8(entity + 0x49, profile.InvincibilityFrames);
-            memory.WriteU16(entity + 0x58, profile.StunFrames);
-            memory.WriteU16(entity + 0x6A, profile.HitEffect);
-
-            // These three fields publish the entity to native update/hit detection and stay last.
-            memory.WriteU16(entity + EntityIdOffset, AttackEntityId);
-            memory.WriteU32(entity + EntityUpdateOffset, EntityNullAddress);
-            memory.WriteU16(entity + EntityHitboxStateOffset, profile.HitState);
-            GameApi.CallApi(context, memory, AssignAttackerIdSlot, entity);
-
-            _attackLastAttackerId = memory.ReadU16(entity + EntityEnemyIdOffset);
-            _attackAttackerIdValid = _attackLastAttackerId is >= 0 and < 11;
-            if (!_attackAttackerIdValid)
-                throw new InvalidOperationException($"attacker ID {_attackLastAttackerId} is outside native cooldown bounds");
-            CaptureAttackTargets(memory);
             _attackWindowObserved = false;
-            _attackCleanupPending = false;
             _attackArmMainGeneration = _mainEngineCalls;
             _attackArmUpdateGeneration = _updateCalls;
             _attackObservedMainGeneration = -1;
             _attackAllocations++;
-            _attackStatus = $"ARMED:{profile.Kind}:{slot}";
-            completed = true;
+            _attackStatus = "ARMED";
         }
-        catch (Exception ex)
+        else
         {
-            MarkAttackHardFailure($"BUILD:{ex.GetType().Name}");
-        }
-        finally
-        {
-            if (!completed)
+            AttackLeaseCommand failed = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
+            if (_attackPublication.Phase == AttackPublicationPhase.RolledBack)
             {
-                CleanupOwnedAttack(memory, "BUILD_FAIL");
-                _attackStatus = $"FAIL:{_attackStatus}";
+                AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, failed);
+                ClearOwnedAttackMetadata(authorization);
+                MarkAttackHardFailure("PUBLICATION-ROLLED-BACK");
             }
+            else if (_attackPublication.Phase == AttackPublicationPhase.RetryableQuarantine)
+                RetainAttackCleanupPending(failed, "PUBLICATION");
+            else if (_attackPublication.Phase == AttackPublicationPhase.MutationStopped)
+                StopQuarantinedMutation(failed, "PUBLICATION");
+            else
+                StopResidualAttackMutation(failed, "PUBLICATION");
+            _attackStatus = $"FAIL:{_attackStatus}";
         }
     }
 
     private bool CleanupOwnedAttack(IMemory memory, string reason)
     {
-        if (_ownedAttackSlot < 0) return true;
-        int slot = _ownedAttackSlot;
-        uint generation = _ownedAttackGeneration;
-        uint roomHash = _ownedAttackRoomHash;
+        AttackLeaseCommand request = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
+        if (request.Kind == AttackLeaseCommandKind.None) return true;
+        if (_attackPublication.Phase == AttackPublicationPhase.RetryableQuarantine)
+            return TryCleanupQuarantinedAttack(memory, reason);
+        if (_attackPublication.Phase is AttackPublicationPhase.MutationStopped or
+            AttackPublicationPhase.ResidualStopped) return false;
+        int slot = request.Lease.Slot;
+        uint generation = request.Lease.Generation;
+        uint roomHash = request.Lease.RoomHash;
         uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
         bool owned;
         try
@@ -3083,26 +2999,28 @@ public sealed class CoopFeasibility : IMod
         }
         catch (Exception ex)
         {
-            RetainAttackCleanupPending(slot, generation, roomHash, $"VERIFY:{ex.GetType().Name}");
+            RetainAttackCleanupPending(request, $"VERIFY:{ex.GetType().Name}");
             return false;
         }
         if (!owned)
         {
-            StopQuarantinedMutation(slot, generation, roomHash, "OWNERSHIP-MISMATCH");
+            StopQuarantinedMutation(request, "OWNERSHIP-MISMATCH");
             return false;
         }
+        AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, request);
+        _attackPublicationAdapter.Bind(memory, entity, _latchedAttackProfile);
 
         try
         {
             if (!_attackWindowObserved)
             {
-                try { ObserveAttackResult(memory, entity); }
+                try { ObserveAttackResult(_attackPublicationAdapter); }
                 catch (Exception ex) { MarkAttackHardFailure($"OBSERVE:{ex.GetType().Name}"); }
             }
         }
         catch (Exception ex)
         {
-            RetainAttackCleanupPending(slot, generation, roomHash, $"DEACTIVATE:{ex.GetType().Name}");
+            RetainAttackCleanupPending(request, $"DEACTIVATE:{ex.GetType().Name}");
             return false;
         }
 
@@ -3120,23 +3038,28 @@ public sealed class CoopFeasibility : IMod
         }
         bool nativeHit = memory.ReadU8(entity + 0x48) != 0;
         if (reason == "WINDOW" && timingValid && !_attackHardFailure &&
-            _attackProfileLatched && _latchedAttackProfile.Kind == AttackKind.Projectile && !nativeHit &&
-            TryAdvanceProjectileWindow(memory, entity))
-            return true;
-
-        try
+            _attackProfileLatched && _latchedAttackProfile.Kind == AttackKind.Projectile && !nativeHit)
         {
-            DeactivateAndClearOwnedAttack(memory, entity);
+            if (TryAdvanceProjectileWindow(memory, entity))
+            {
+                _attackLease = AttackLeaseMachine.RetainOwned(_attackLease, authorization);
+                return true;
+            }
+            if (_ownedAttackSlot < 0 || _attackPublication.Phase is
+                AttackPublicationPhase.RetryableQuarantine or AttackPublicationPhase.ResidualStopped or
+                AttackPublicationPhase.MutationStopped)
+                return false;
         }
-        catch (Exception ex)
+
+        if (!AttackPublicationPolicy.Cleanup(ref _attackPublication, _attackPublicationAdapter))
         {
-            RetainAttackCleanupPending(slot, generation, roomHash, $"DEACTIVATE:{ex.GetType().Name}");
+            ReconcileRejectedAttackOperation(request, "DEACTIVATE-REJECTED");
             return false;
         }
         if (reason != "WINDOW" && reason != "BUILD_FAIL") _attackLifecycleCancellations++;
         _attackCleanups++;
-        _attackStatus = $"CLEAN:{reason}";
-        ClearOwnedAttackMetadata();
+        _attackStatus = CleanupStatus(reason);
+        ClearOwnedAttackMetadata(authorization);
         return true;
     }
 
@@ -3157,25 +3080,20 @@ public sealed class CoopFeasibility : IMod
         int screenY = (_projectileY >> 16) - scrollY;
         if (screenX is < -16 or > 272 || screenY is < -16 or > 240) return false;
 
-        // Keep exact ownership while making the entity invisible to collision during mutation.
-        memory.WriteU32(entity + EntityUpdateOffset, 0);
-        memory.WriteU16(entity + EntityHitboxStateOffset, 0);
-        memory.WriteU16(entity + EntityIdOffset, 0);
-        memory.WriteU32(entity, unchecked((uint)(screenX << 16)));
-        memory.WriteU32(entity + 0x04, unchecked((uint)(screenY << 16)));
-        memory.WriteU8(entity + 0x48, 0);
-        memory.WriteU16(entity + 0x44, 0);
-        CaptureAttackTargets(memory);
+        _attackPublicationAdapter.Bind(memory, entity, profile);
+        if (!AttackPublicationPolicy.RepublishProjectile(ref _attackPublication,
+            _attackPublicationAdapter, _mainEngineCalls, _updateCalls))
+        {
+            AttackLeaseCommand probe = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
+            ReconcileRejectedAttackOperation(probe, "REPUBLISH-REJECTED");
+            return false;
+        }
         _attackWindowObserved = false;
         _attackArmMainGeneration = _mainEngineCalls;
         _attackArmUpdateGeneration = _updateCalls;
         _attackObservedMainGeneration = -1;
-        // Publication fields remain last for every normal-engine window.
-        memory.WriteU16(entity + EntityIdOffset, AttackEntityId);
-        memory.WriteU32(entity + EntityUpdateOffset, EntityNullAddress);
-        memory.WriteU16(entity + EntityHitboxStateOffset, profile.HitState);
         _projectileWindows++;
-        _attackStatus = $"PROJECTILE:{_projectileLifetime}";
+        _attackStatus = "PROJECTILE";
         return true;
     }
 
@@ -3185,8 +3103,15 @@ public sealed class CoopFeasibility : IMod
         _attackSpawnPending = false;
         if (RecompOne.Runtime.Runtime.Mem is IMemory memory)
         {
-            CleanupOwnedAttack(memory, reason);
-            TryCleanupQuarantinedAttack(memory, reason);
+            try
+            {
+                CleanupOwnedAttack(memory, reason);
+                TryCleanupQuarantinedAttack(memory, reason);
+            }
+            catch (Exception ex)
+            {
+                MarkAttackHardFailure($"LEASE:{ex.GetType().Name}");
+            }
         }
     }
 
@@ -3198,6 +3123,21 @@ public sealed class CoopFeasibility : IMod
         _projectileX = _projectileY = _projectileOriginX = _projectileLifetime = 0;
     }
 
+    private static string CleanupStatus(string reason) => reason switch
+    {
+        "WINDOW" => "CLEAN:WINDOW",
+        "UNSAFE" => "CLEAN:UNSAFE",
+        "COLLISION" => "CLEAN:COLLISION",
+        "OBSERVE_FAIL" => "CLEAN:OBSERVE",
+        "HURT" => "CLEAN:HURT",
+        "TRANS" or "TRANSITION" => "CLEAN:TRANSITION",
+        "PLAYER" => "CLEAN:PLAYER",
+        "RESET" or "MANUAL_RESET" => "CLEAN:RESET",
+        "FATAL" => "CLEAN:FATAL",
+        "DISABLED" => "CLEAN:DISABLED",
+        _ => "CLEAN:LIFECYCLE"
+    };
+
     private void MarkAttackHardFailure(string status)
     {
         _attackFailures++;
@@ -3208,188 +3148,127 @@ public sealed class CoopFeasibility : IMod
         _attackStatus = status;
     }
 
-    private void RetainAttackCleanupPending(int slot, uint generation, uint roomHash, string status)
+    private void RetainAttackCleanupPending(AttackLeaseCommand probe, string status)
     {
-        _attackQuarantineSlot = slot;
-        _attackQuarantineGeneration = generation;
-        _attackQuarantineRoomHash = roomHash;
-        _ownedAttackSlot = slot;
-        _attackCleanupPending = true;
-        _attackQuarantineMutationStopped = false;
-        MarkAttackHardFailure($"CLEANUP-PENDING:{status}:{slot}");
+        _attackLease = AttackLeaseMachine.ProbeFault(_attackLease, probe);
+        MarkAttackHardFailure($"CLEANUP-PENDING:{status}:{probe.Lease.Slot}");
     }
 
-    private void StopQuarantinedMutation(int slot, uint generation, uint roomHash, string status)
+    private void StopQuarantinedMutation(AttackLeaseCommand probe, string status)
     {
-        _attackQuarantineSlot = slot;
-        _attackQuarantineGeneration = generation;
-        _attackQuarantineRoomHash = roomHash;
-        _ownedAttackSlot = -1;
-        _attackCleanupPending = false;
-        _attackQuarantineMutationStopped = true;
-        MarkAttackHardFailure($"QUARANTINE-REUSED:{status}:{slot}");
+        _attackLease = AttackLeaseMachine.ProbeReused(_attackLease, probe);
+        MarkAttackHardFailure($"QUARANTINE-REUSED:{status}:{probe.Lease.Slot}");
     }
 
-    private static void DeactivateAndClearOwnedAttack(IMemory memory, uint entity)
+    private void StopResidualAttackMutation(AttackLeaseCommand probe, string status)
     {
-        memory.WriteU32(entity + EntityUpdateOffset, 0);
-        memory.WriteU16(entity + EntityHitboxStateOffset, 0);
-        memory.WriteU16(entity + EntityIdOffset, 0);
-        for (uint offset = 0; offset < Entity.Stride; offset += 4) memory.WriteU32(entity + offset, 0);
+        _attackLease = AttackLeaseMachine.TerminalFault(_attackLease, probe);
+        MarkAttackHardFailure($"RESIDUAL-STOP:{status}:{probe.Lease.Slot}");
     }
 
-    private void ClearOwnedAttackMetadata()
+    private void ReconcileRejectedAttackOperation(AttackLeaseCommand probe, string status)
     {
-        _ownedAttackSlot = -1;
-        _attackCleanupPending = false;
-        _attackQuarantineSlot = -1;
-        _attackQuarantineGeneration = 0;
-        _attackQuarantineRoomHash = 0;
-        _attackQuarantineMutationStopped = false;
-        _attackTargetCount = 0;
+        if (_attackPublication.Phase == AttackPublicationPhase.RolledBack)
+        {
+            AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, probe);
+            ClearOwnedAttackMetadata(authorization);
+            MarkAttackHardFailure(status);
+        }
+        else if (_attackPublication.Phase == AttackPublicationPhase.RetryableQuarantine)
+            RetainAttackCleanupPending(probe, status);
+        else if (_attackPublication.Phase == AttackPublicationPhase.MutationStopped)
+            StopQuarantinedMutation(probe, status);
+        else
+            StopResidualAttackMutation(probe, status);
+    }
+
+    private void ClearOwnedAttackMetadata(AttackLeaseCommand authorization)
+    {
+        _attackLease = AttackLeaseMachine.ClearSucceeded(_attackLease, authorization);
+        _attackPublication = AttackPublicationPolicy.Initial();
+        _attackTargets.Clear();
         _attackWindowObserved = false;
     }
 
     private bool TryCleanupQuarantinedAttack(IMemory memory, string reason)
     {
-        if (_attackQuarantineSlot < 0) return true;
-        if (_attackQuarantineMutationStopped) return false;
-        int slot = _attackQuarantineSlot;
-        uint generation = _attackQuarantineGeneration;
-        uint roomHash = _attackQuarantineRoomHash;
-        uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
-        try
+        bool retainedOwned = _attackLease.Phase == AttackLeasePhase.Owned;
+        AttackLeaseCommand request = retainedOwned
+            ? AttackLeaseMachine.RequestOwnedCleanup(_attackLease)
+            : AttackLeaseMachine.RequestQuarantineRetry(_attackLease);
+        if (request.Kind == AttackLeaseCommandKind.None)
+            return !_attackQuarantineMutationStopped;
+        uint entity = Game.EntitiesAddr + (uint)(request.Lease.Slot * Entity.Stride);
+        _attackPublicationAdapter.Bind(memory, entity, _latchedAttackProfile);
+        if (AttackPublicationPolicy.RetryQuarantine(ref _attackPublication, _attackPublicationAdapter))
         {
-            bool exact = memory.ReadU32(entity + 0x7C) == AttackMarker &&
-                memory.ReadU32(entity + 0x80) == generation &&
-                memory.ReadU32(entity + 0x84) == roomHash;
-            bool free = memory.ReadU32(entity + EntityUpdateOffset) == 0 &&
-                memory.ReadU16(entity + EntityIdOffset) == 0 &&
-                memory.ReadU16(entity + EntityHitboxStateOffset) == 0;
-            if (exact)
+            _attackCleanups++;
+            _attackStatus = "QUARANTINE-CLEAN";
+            if (retainedOwned)
             {
-                DeactivateAndClearOwnedAttack(memory, entity);
-                _attackCleanups++;
-                _attackStatus = $"QUARANTINE-CLEAN:{reason}";
-                ClearOwnedAttackMetadata();
-                return true;
+                AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, request);
+                _attackLease = AttackLeaseMachine.ClearSucceeded(_attackLease, authorization);
             }
-            if (free)
-            {
-                _attackCleanups++;
-                _attackStatus = $"QUARANTINE-FREE:{reason}";
-                ClearOwnedAttackMetadata();
-                return true;
-            }
-            StopQuarantinedMutation(slot, generation, roomHash, "REUSED");
+            else _attackLease = AttackLeaseMachine.RetryFree(_attackLease, request);
+            _attackTargets.Clear();
+            _attackWindowObserved = false;
+            return true;
+        }
+        if (_attackPublication.Phase == AttackPublicationPhase.RetryableQuarantine)
+        {
+            MarkAttackHardFailure("CLEANUP-PENDING:RETRY");
             return false;
         }
-        catch (Exception ex)
-        {
-            RetainAttackCleanupPending(slot, generation, roomHash, $"RETRY:{ex.GetType().Name}");
-            return false;
-        }
+        if (_attackPublication.Phase == AttackPublicationPhase.MutationStopped)
+            StopQuarantinedMutation(request, "RETRY-REUSED");
+        else
+            StopResidualAttackMutation(request, "RETRY-FAULT");
+        return false;
     }
 
-    private void CaptureAttackTargets(IMemory memory)
+    private void CaptureAttackTargets(IAttackTargetReadAdapter adapter)
     {
-        _attackTargetCount = 0;
+        _attackTargets.Clear();
         if (!_attackProfileLatched) return;
         AttackProfile profile = _latchedAttackProfile;
-        int scrollX = unchecked((int)memory.ReadU32(ScrollXAddress)) >> 16;
-        int scrollY = unchecked((int)memory.ReadU32(ScrollYAddress)) >> 16;
-        int attackX = profile.Kind == AttackKind.Projectile
-            ? (_projectileX >> 16) - scrollX
-            : (_proxyX >> 16) - scrollX + (_facingLeft ? -14 : 14);
-        int attackY = profile.Kind == AttackKind.Projectile
-            ? (_projectileY >> 16) - scrollY
-            : (_proxyY >> 16) - scrollY - 8;
-        for (int slot = ContactSlotStart; slot < ContactSlotStart + ContactSlotCount &&
-            _attackTargetCount < _attackTargetAddresses.Length; slot++)
-        {
-            uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
-            uint update = memory.ReadU32(entity + EntityUpdateOffset);
-            ushort id = memory.ReadU16(entity + EntityIdOffset);
-            ushort targetState = memory.ReadU16(entity + EntityHitboxStateOffset);
-            if (!IsNativeTargetBody(targetState) || (targetState & profile.HitState) == 0 ||
-                (memory.ReadU32(entity + EntityFlagsOffset) & EntityDead) != 0) continue;
-            int width = memory.ReadU8(entity + EntityHitboxWidthOffset);
-            int height = memory.ReadU8(entity + EntityHitboxHeightOffset);
-            if (width == 0 || height == 0) continue;
-            int offsetX = unchecked((short)memory.ReadU16(entity + EntityHitboxOffsetX));
-            int centerX = unchecked((short)memory.ReadU16(entity + 0x02)) +
-                (memory.ReadU16(entity + EntityFacingOffset) != 0 ? -offsetX : offsetX);
-            int centerY = unchecked((short)memory.ReadU16(entity + 0x06)) +
-                unchecked((short)memory.ReadU16(entity + EntityHitboxOffsetY));
-            if (centerX is <= -32 or >= 288 || centerY is <= -32 or >= 256) continue;
-            if (Math.Abs(centerX - attackX) >= width + profile.HalfWidth ||
-                Math.Abs(centerY - attackY) >= height + profile.HalfHeight) continue;
-            int index = _attackTargetCount++;
-            ushort enemyId = memory.ReadU16(entity + EntityEnemyIdOffset);
-            _attackTargetAddresses[index] = entity;
-            _attackTargetIdentities[index] = ((ulong)update << 32) | ((ulong)enemyId << 16) | id;
-            _attackTargetHpBefore[index] = unchecked((short)memory.ReadU16(entity + 0x3E));
-            _attackTargetCooldownBefore[index] = memory.ReadU8(entity + 0x6D + (uint)_attackLastAttackerId);
-        }
+        int worldX = profile.Kind == AttackKind.Projectile ? _projectileX : _proxyX;
+        int worldY = profile.Kind == AttackKind.Projectile ? _projectileY : _proxyY;
+        var input = new AttackTargetCaptureInput(worldX, worldY,
+            profile.Kind == AttackKind.Projectile, _facingLeft, profile.HalfWidth,
+            profile.HalfHeight, profile.HitState, _attackLastAttackerId);
+        AttackTargetObservationPolicy.Capture(_attackTargets, adapter, input);
     }
 
-    private void ObserveAttackResult(IMemory memory, uint attackEntity)
+    private void ObserveAttackResult(IAttackTargetReadAdapter adapter)
     {
         _attackWindowObserved = true;
         _attackObservedMainGeneration = _mainEngineCalls;
-        bool hitFlag = memory.ReadU8(attackEntity + 0x48) != 0;
-        bool targetCooldown = false;
-        if (hitFlag) _attackHitFlagObservations++;
-        for (int i = 0; i < _attackTargetCount; i++)
-        {
-            uint entity = _attackTargetAddresses[i];
-            uint update = memory.ReadU32(entity + EntityUpdateOffset);
-            ushort id = memory.ReadU16(entity + EntityIdOffset);
-            ushort enemyId = memory.ReadU16(entity + EntityEnemyIdOffset);
-            ulong identity = ((ulong)update << 32) | ((ulong)enemyId << 16) | id;
-            if (identity != _attackTargetIdentities[i]) continue;
-            short hpAfter = unchecked((short)memory.ReadU16(entity + 0x3E));
-            if (hpAfter < _attackTargetHpBefore[i])
-                _attackTargetHpChanges++;
-            if (_attackAttackerIdValid &&
-                memory.ReadU8(entity + 0x6D + (uint)_attackLastAttackerId) > _attackTargetCooldownBefore[i])
-            {
-                _attackCooldownObservations++;
-                targetCooldown = true;
-                if (hitFlag)
-                {
-                    _nativeTargetHits++;
-                    if (_attackTargetHpBefore[i] > 0 &&
-                        (hpAfter <= 0 || (memory.ReadU32(entity + EntityFlagsOffset) & EntityDead) != 0))
-                        _defeatedTargets++;
-                    if (_attackTargetHpBefore[i] <= 0 || hpAfter <= 0)
-                        _compatibleZeroHpHits++;
-                }
-            }
-        }
-        if (hitFlag && targetCooldown) _attackCausalResults++;
+        AttackTargetObservation result = AttackTargetObservationPolicy.Observe(_attackTargets,
+            adapter, _attackLastAttackerId);
+        if (result.HitFlag) _attackHitFlagObservations++;
+        _attackTargetHpChanges += result.HpChanges;
+        _attackCooldownObservations += result.CooldownChanges;
+        _nativeTargetHits += result.NativeHits;
+        _defeatedTargets += result.Defeated;
+        _compatibleZeroHpHits += result.CompatibleZeroHpHits;
+        _attackCausalResults += result.CausalResults;
     }
 
     private void ObserveOwnedAttackWindow(IMemory memory)
     {
         if (_ownedAttackSlot < 0 || _attackWindowObserved) return;
         int slot = _ownedAttackSlot;
+        AttackLeaseCommand probe = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
         uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
         try
         {
-            if (memory.ReadU32(entity + 0x7C) != AttackMarker ||
-                memory.ReadU32(entity + 0x80) != _ownedAttackGeneration ||
-                memory.ReadU32(entity + 0x84) != _ownedAttackRoomHash)
+            _attackPublicationAdapter.Bind(memory, entity, _latchedAttackProfile);
+            if (!AttackPublicationPolicy.Observe(ref _attackPublication, _attackPublicationAdapter,
+                _mainEngineCalls))
             {
-                StopQuarantinedMutation(slot, _ownedAttackGeneration, _ownedAttackRoomHash, "OBSERVE-MISMATCH");
+                ReconcileRejectedAttackOperation(probe, "OBSERVE-REJECTED");
                 return;
             }
-            if (_mainEngineCalls != _attackArmMainGeneration + 1)
-            {
-                _attackTimingFailures++;
-                MarkAttackHardFailure("OBSERVE-NORMAL-WINDOW-TIMING");
-            }
-            ObserveAttackResult(memory, entity);
         }
         catch (Exception ex)
         {
@@ -3421,11 +3300,28 @@ public sealed class CoopFeasibility : IMod
         return free;
     }
 
-    private void ResetDiagnostic()
+    private bool TryResetDiagnostic()
     {
-        CancelOwnedAttack("RESET");
+        // Every fallible/nonwrapping transition is prepared before native memory is touched.
+        if (!DiagnosticResetPreparationPolicy.TryPrepare(_diagnosticGeneration, _movementSession,
+            _attackLease, _attackPublication, _jumpForgiveness, _stance, _locomotionState,
+            _reconstructionPolicy, out DiagnosticResetPreparation preparation)) return false;
+        bool preparedConnected;
+        ushort preparedVirtualHeld;
+        try
+        {
+            preparedConnected = Controller.Connected2;
+            preparedVirtualHeld = ReadVirtualKeysDown();
+        }
+        catch { return false; }
+        AttackResetPreflightOutcome attackPreflight = PreflightAttackReset(preparation.Publication);
+        if (!AttackResetPreflight.AllowsReset(attackPreflight))
+            return false;
+        if (!DiagnosticResetPreparationPolicy.CommitPreparedReducers(preparation, attackPreflight,
+            ref _attackLease, _movementSession, _jumpForgiveness, _stance, _locomotionState,
+            _reconstructionPolicy)) return false;
         bool cleanupQuarantined = _attackQuarantineSlot >= 0;
-        _diagnosticGeneration++;
+        _diagnosticGeneration = preparation.NextDiagnosticGeneration;
         _fatal = false;
         _firstError = "none";
         _collisionDisabled = false;
@@ -3437,13 +3333,14 @@ public sealed class CoopFeasibility : IMod
         _operationStatus = "Diagnostic reset; initialization awaiting a safe player update";
         _vsyncCalls = _mainEngineCalls = _updateCalls = _renderCalls = _pad2Reads = 0;
         _connectionChanges = 0;
-        _previousConnected = Controller.Connected2;
+        _previousConnected = preparedConnected;
         _hostSeen = _padSeen = _gameSeen = _tapSeen = 0;
         _hostState = _padState = 0xFFFF;
         _gamePressed = _gameTapped = 0;
         _neutralSeen = false;
+        _pad2Source.Reset();
         _virtualPressed = 0;
-        _virtualPreviousHeld = ReadVirtualKeysDown();
+        _virtualPreviousHeld = preparedVirtualHeld;
         _virtualRawHeld = _virtualPreviousHeld;
         _virtualRawSeen = 0;
         _virtualDownSeen = _virtualUpSeen = 0;
@@ -3459,18 +3356,11 @@ public sealed class CoopFeasibility : IMod
         _contactVisualConfirmed = false;
         _leftXMin = _leftYMin = _rightXMin = _rightYMin = 0xFF;
         _leftXMax = _leftYMax = _rightXMax = _rightYMax = 0;
-        _proxyInitialized = false;
-        _reinitializeRequested = false;
-        _proxyResetRequests = _proxyResetCompletions = 0;
         _leftDistanceRaw = _rightDistanceRaw = 0;
         _jumpObserved = false;
         _jumpPending = false;
-        _locomotion = ProxyLocomotion.Falling;
-        _animation = ProxyAnimation.Fall;
-        _animationFrame = _animationTick = _animationTransitions = _animationStatesSeen = 0;
-        _animationAdvanceStatesSeen = _ownedHurtboxStatesSeen = 0;
-        _animationStateValid = false;
-        _animationAdvances = _ownedHurtboxSamples = 0;
+        _ownedHurtboxStatesSeen = 0;
+        _ownedHurtboxSamples = 0;
         _visualPosesSeen = _hurtboxPosesSeen = 0;
         _independentVisualEligible = _independentVisualSubmitted = 0;
         _independentRestoreChecks = _independentRestoreFailures = _independentVisualFailures = 0;
@@ -3478,12 +3368,8 @@ public sealed class CoopFeasibility : IMod
         _poseTableValidated = false;
         _independentNativeFrame = 0;
         _independentVisualStatus = "WAIT";
-        ClearJumpForgiveness();
         _normalJumps = _coyoteJumps = _bufferedJumps = 0;
-        _crouched = _standBlocked = _landedThisUpdate = _horizontalCommandThisUpdate = false;
-        _reconstructionSafeFrames = _reconstructionAttempts = _reconstructionSuccesses = 0;
-        _reconstructionFailures = _tetherRecoveries = 0;
-        _reconstructionHardFailure = false;
+        _landedThisUpdate = _horizontalCommandThisUpdate = false;
         _reconstructionStatus = "WAIT";
         _collisionCalls = 0;
         _collisionRestoreFailures = 0;
@@ -3503,67 +3389,30 @@ public sealed class CoopFeasibility : IMod
         _nativeSpriteFlipSeenInStreak = false;
         _nativeSpriteStatus = "WAIT";
         _hudEligible = _hudSubmitted = 0;
-        Array.Clear(_contactIdentities);
-        Array.Clear(_nextContactIdentities);
-        Array.Clear(_contactAttacks);
-        Array.Clear(_contactPhaseKeys);
-        Array.Clear(_nextContactPhaseKeys);
-        Array.Clear(_contactGenerations);
-        Array.Clear(_contactWasEligible);
-        Array.Clear(_nextContactEligible);
-        _contactBaselinePending = true;
-        _contactSuspended = false;
-        _contactResumeGracePending = false;
-        _contactResumeGraceBudget = 1;
-        _contactResumeGraceScans = _contactContinuousSafeScans = 0;
+        Array.Clear(_contactObservations);
+        _contactOpportunities.Reset();
         _contactDisabled = false;
-        _contactOverlap = false;
-        _contactScanFrames = _contactSlotsScanned = _contactEligibleSamples = 0;
-        _contactOverlapSamples = _contactDamagingSamples = _contactStaySamples = 0;
-        _contactCurrent = _contactPeak = _contactEntries = _contactExits = _contactResets = 0;
         _contactGuardChecks = _contactGuardFailures = 0;
         _contactLastSlot = -1;
         _contactLastEntityId = 0;
         _contactOffsetX = _contactOffsetY = _contactHalfWidth = _contactHalfHeight = 0;
         _contactGuardRegion = "none";
         _contactStatus = "WAIT";
-        Array.Clear(_contactRepeatTicks);
-        Array.Clear(_nextContactAttacks);
-        Array.Clear(_nextContactElements);
-        Array.Clear(_nextContactCentersX);
-        Array.Clear(_nextContactCentersY);
         ResetManagedHealth();
         _attackTimer = 0;
         _attackSpawnPending = false;
         if (!cleanupQuarantined) _outgoingAttackDisabled = _attackHardFailure = false;
-        if (cleanupQuarantined && !_attackQuarantineMutationStopped)
-        {
-            _ownedAttackSlot = _attackQuarantineSlot;
-            _ownedAttackGeneration = _attackQuarantineGeneration;
-            _ownedAttackRoomHash = _attackQuarantineRoomHash;
-        }
-        else
-        {
-            _ownedAttackSlot = -1;
-            _ownedAttackGeneration = _ownedAttackRoomHash = 0;
-        }
-        if (!cleanupQuarantined)
-        {
-            _attackQuarantineSlot = -1;
-            _attackQuarantineGeneration = _attackQuarantineRoomHash = 0;
-        }
         _attackAllocations = _attackNormalEngineWindows = _attackCleanups = 0;
         _attackLifecycleCancellations = 0;
         _attackFailures = cleanupQuarantined ? 1 : 0;
         _attackLastAttackerId = _attackHitFlagObservations = _attackCooldownObservations = 0;
-        _attackTargetHpChanges = _attackTargetCount = 0;
+        _attackTargetHpChanges = 0;
+        _attackTargets.Clear();
         _attackAttackerIdValid = false;
         _attackWindowObserved = false;
-        _attackCleanupPending = cleanupQuarantined && !_attackQuarantineMutationStopped;
-        if (!cleanupQuarantined) _attackQuarantineMutationStopped = false;
         _attackArmMainGeneration = _attackArmUpdateGeneration = 0;
         _attackObservedMainGeneration = -1;
-        _attackTimingFailures = _attackCausalResults = _attackPhaseCompletionMask = 0;
+        _attackTimingFailures = _attackCausalResults = 0;
         _attackProfileLatched = false;
         _pendingAttackKind = AttackKind.Contact;
         _latchedAttackProfile = default;
@@ -3583,24 +3432,34 @@ public sealed class CoopFeasibility : IMod
         _awarenessCalls = _awarenessOverrides = 0;
         _awarenessChosenSlot = -1;
         _awarenessStatus = "WAIT";
-        Array.Clear(_attackTargetAddresses);
-        Array.Clear(_attackTargetIdentities);
-        Array.Clear(_attackTargetHpBefore);
-        Array.Clear(_attackTargetCooldownBefore);
         if (!cleanupQuarantined) _attackStatus = "IDLE";
-        _roomKnown = false;
-        _roomStableFrames = 0;
-        _transitionPending = false;
-        _roomLayerEvents = 0;
-        _completedTransitions = 0;
-        _passedTransitions = 0;
-        _awaitingPostTransitionMovement = false;
-        _postTransitionMoved = false;
-        _postTransitionCommandedRaw = 0;
+        _lastManagedInput = default;
+        _lastManagedSnapshot = default;
+        _lastManagedStateHash = 0;
+        _managedSnapshotCount = 0;
         _slotSamples = 0;
         _freePlayerCurrent = _freeAttackCurrent = _freeStageCurrent = _freeTailCurrent = 0;
         _longestAttackCurrent = 0;
         _minimumFreeAttack = _minimumLongestAttack = int.MaxValue;
+        return true;
+    }
+
+    private AttackResetPreflightOutcome PreflightAttackReset(
+        in AttackPublicationResetCommand publication)
+    {
+        bool memoryAvailable = RecompOne.Runtime.Runtime.Mem is IMemory;
+        if (memoryAvailable && _attackPublication.Phase is not
+            (AttackPublicationPhase.Empty or AttackPublicationPhase.RolledBack or
+             AttackPublicationPhase.MutationStopped or AttackPublicationPhase.ResidualStopped))
+        {
+            IMemory memory = (IMemory)RecompOne.Runtime.Runtime.Mem!;
+            uint entity = Game.EntitiesAddr + (uint)(_attackPublication.Tuple.Slot * Entity.Stride);
+            _attackPublicationAdapter.Bind(memory, entity, _latchedAttackProfile);
+            return AttackResetPreflight.RunPrepared(ref _attackPublication,
+                _attackPublicationAdapter, true, publication);
+        }
+        return AttackResetPreflight.RunPrepared(ref _attackPublication, null,
+            memoryAvailable, publication);
     }
 
     private void Fail(string subsystem, Exception ex)
@@ -3610,8 +3469,8 @@ public sealed class CoopFeasibility : IMod
         _fatal = true;
         _enabled = false;
         _safeFrame = false;
-        _proxyInitialized = false;
-        _animationStateValid = false;
+        _movementSession.Fatal();
+        _locomotionState.Invalidate();
         DisarmAwareness("FATAL");
         _attackSpawnPending = false;
         _attackTimer = 0;
@@ -3641,11 +3500,11 @@ public sealed class CoopFeasibility : IMod
             : Controller.Connected2 && hostCount == 7 && padCount == 7 && gameCount == 7 && tapCount == 7 &&
               (!_physicalControllerTest || axisCount == 4) ? 'P' : 'W';
         char movement = (_leftDistanceRaw >> 16) >= 8 && (_rightDistanceRaw >> 16) >= 8 && _jumpObserved ? 'P' : 'W';
-        int animationMask = (1 << ((int)ProxyAnimation.Downed + 1)) - 1;
-        int advancingAnimationMask = (1 << (int)ProxyAnimation.Idle) |
-            (1 << (int)ProxyAnimation.Walk) | (1 << (int)ProxyAnimation.JumpRise) |
-            (1 << (int)ProxyAnimation.Fall) | (1 << (int)ProxyAnimation.Landing) |
-            (1 << (int)ProxyAnimation.CrouchEnter) | (1 << (int)ProxyAnimation.CrouchExit);
+        int animationMask = (1 << ((int)ManagedAnimation.Downed + 1)) - 1;
+        int advancingAnimationMask = (1 << (int)ManagedAnimation.Idle) |
+            (1 << (int)ManagedAnimation.Walk) | (1 << (int)ManagedAnimation.JumpRise) |
+            (1 << (int)ManagedAnimation.Fall) | (1 << (int)ManagedAnimation.Landing) |
+            (1 << (int)ManagedAnimation.CrouchEnter) | (1 << (int)ManagedAnimation.CrouchExit);
         ulong poseMask = IndependentPoseCount >= 64 ? ulong.MaxValue : (1UL << IndependentPoseCount) - 1UL;
         char animation = _fatal ? 'F' : (_animationStatesSeen & animationMask) == animationMask &&
             (_animationAdvanceStatesSeen & advancingAnimationMask) == advancingAnimationMask &&
@@ -3659,9 +3518,11 @@ public sealed class CoopFeasibility : IMod
         char nativeSprite = _visualConfirmed && _nativeSpriteSubmitted >= 60 &&
             _nativeSpriteStreak >= 60 && _nativeSpriteFlipSeenInStreak && _nativeSpriteStatus == "OK" ? 'P' : 'W';
         char contact = _contactDisabled || _contactGuardFailures != 0 ? 'F' :
-            _contactScanFrames >= 120 && _contactSlotsScanned == _contactScanFrames * ContactSlotCount &&
-            _contactGuardChecks == _contactScanFrames && _contactEntries > 0 && _contactStaySamples > 0 &&
-            _contactExits > 0 && _contactDamagingSamples > 0 && _contactVisualConfirmed ? 'P' : 'W';
+            _contactOpportunities.ScanFrames >= 120 &&
+            _contactOpportunities.SlotsScanned == _contactOpportunities.ScanFrames * ContactSlotCount &&
+            _contactGuardChecks == _contactOpportunities.ScanFrames && _contactOpportunities.Entries > 0 &&
+            _contactOpportunities.StaySamples > 0 && _contactOpportunities.Exits > 0 &&
+            _contactOpportunities.DamagingSamples > 0 && _contactVisualConfirmed ? 'P' : 'W';
         char collision = _fatal || _collisionDisabled || _collisionRestoreFailures != 0 ? 'F' :
             _unsupportedTerrainSuspensions == 0 && _collisionCalls >= 120 && _sawSolid && _sawEmpty && _groundContacts > 0 &&
             _wallCorrections > 0 && _ceilingCorrections > 0 ? 'P' : 'W';
@@ -3688,11 +3549,11 @@ public sealed class CoopFeasibility : IMod
             ? $"I={input}:K:-/{padCount}/{gameCount}/{tapCount}/A- K={virtualDownCount}/{virtualUpCount}/H{_virtualPressed:X4}/R{_virtualRawHeld:X4}/U{_virtualRawSeen:X4}/N{Bool(_virtualNeutralObserved)}/S{_virtualSuppressionFrames}"
             : $"I={input}:C:{hostCount}/{padCount}/{gameCount}/{tapCount}/A{axisCount} K=-";
 
-        return $"P2D4 VER={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
+        string report = $"P2D4 VER={Version} H={hooks}:{_vsyncCalls}/{_mainEngineCalls}/{_updateCalls}/{_renderCalls}/{_pad2Reads} {inputReport} " +
                $"M={movement}:{_leftDistanceRaw >> 16}/{_rightDistanceRaw >> 16}/{Bool(_jumpObserved)} " +
                $"R={render}:{_renderSubmitted}/{_renderEligible}/{Bool(_visualConfirmed)}/D{_drawOtCalls}/H{Bool(GpuHle.Active)}{Bool(GpuHle.Backend?.Ready == true)} " +
                $"N={nativeSprite}:{_nativeSpriteSubmitted}/{_nativeSpriteCaptured}/{_nativeSpriteEligible}/{_nativeSpriteFlipped}/{_nativeSpriteFallbacks}/S{_nativeSpriteStreak}/F{Bool(_nativeSpriteFlipSeenInStreak)}/L{_nativeSpriteStatus} " +
-               $"B={contact}:F{_contactScanFrames}/S{_contactSlotsScanned}/E{_contactEligibleSamples}/O{_contactOverlapSamples}/C{_contactCurrent}/P{_contactPeak}/D{_contactDamagingSamples}/I{_contactEntries}/T{_contactStaySamples}/X{_contactExits}/R{_contactResets}/U{_contactResumeGraceScans},{_contactResumeGraceBudget},{Bool(_contactSuspended)}/G{_contactGuardChecks},{_contactGuardFailures}/V{Bool(_contactVisualConfirmed)}/H{_contactOffsetX},{_contactOffsetY},{_contactHalfWidth},{_contactHalfHeight}/Q{_contactGuardRegion}/L{_contactStatus} " +
+               $"B={contact}:F{_contactOpportunities.ScanFrames}/S{_contactOpportunities.SlotsScanned}/E{_contactOpportunities.EligibleSamples}/O{_contactOpportunities.OverlapSamples}/C{_contactOpportunities.Current}/P{_contactOpportunities.Peak}/D{_contactOpportunities.DamagingSamples}/I{_contactOpportunities.Entries}/T{_contactOpportunities.StaySamples}/X{_contactOpportunities.Exits}/R{_contactOpportunities.Resets}/U{_contactOpportunities.ResumeGraceScans},{_contactOpportunities.ResumeGraceBudget},{Bool(_contactOpportunities.Suspended)}/G{_contactGuardChecks},{_contactGuardFailures}/V{Bool(_contactVisualConfirmed)}/H{_contactOffsetX},{_contactOffsetY},{_contactHalfWidth},{_contactHalfHeight}/Q{_contactGuardRegion}/L{_contactStatus} " +
                $"C={collision}:{_collisionCalls}/{_collisionRestoreFailures}/{_invalidCorrections}/{_unsupportedTerrainSuspensions}/{_groundContacts}/{_wallCorrections}/{_ceilingCorrections}/B{Bool(_sawSolid)}{Bool(_sawEmpty)} " +
                $"T={transition}:{_passedTransitions}/{_completedTransitions}/{_roomLayerEvents}/R{_reconstructionSafeFrames},{_reconstructionAttempts},{_reconstructionSuccesses},{_reconstructionFailures},H{_tetherRecoveries}/L{_reconstructionStatus} " +
                $"S={slots}:{DisplayMinimum(_minimumFreeAttack)}/{DisplayMinimum(_minimumLongestAttack)}/{_slotSamples} " +
@@ -3705,6 +3566,7 @@ public sealed class CoopFeasibility : IMod
                $"EN={enemies}:S{_enemyDiagnosticScans}/N{_enemyNativeCandidateSamples}/C{_enemyCompatibleCandidateSamples}/T{_nearestTargetSlot},{_nearestTargetEntityId},{_nearestTargetEnemyId},{_nearestTargetHp},{_nearestTargetP1Distance},{_nearestTargetP2Distance},{Bool(_nearestTargetCompatible)}/H{_nativeTargetHits},{_defeatedTargets},{_compatibleZeroHpHits}/L{_enemyDiagnosticStatus} " +
                $"AW={awareness}:C{_awarenessCalls}/O{_awarenessOverrides}/S{_awarenessChosenSlot}/L{_awarenessStatus} HU={hud}:E{_hudEligible}/S{_hudSubmitted} " +
                $"HP={health}:{_managedHp}/{ManagedMaxHp}/I{_damageInvulnerability}/K{_hurtLock}/D{_damageEvents},{_damageConsumed},{_damageSuppressedInvul},{_damageSuppressedHitInvul},{_lastDamage},{_lastDamageSlot},{_lastDamageElement:X}/N{Bool(_downed)},{_downedCount}/R{_reviveProgress},{_reviveStarts},{_reviveCancels},{_revives},{_reviveRecoveries}/F{_healthInvariantFailures}";
+        return P2D4Report.Parse(report).CanonicalLine;
     }
 
     private string MissingHostButtons()
@@ -3824,8 +3686,7 @@ public sealed class CoopFeasibility : IMod
     private void QueueProxyReset()
     {
         CancelOwnedAttack("MANUAL_RESET");
-        _proxyResetRequests++;
-        _reinitializeRequested = true;
+        _movementSession.RequestManualReset();
         _operationStatus = "Proxy reset queued";
     }
 
@@ -3962,19 +3823,12 @@ public sealed class CoopFeasibility : IMod
         SuspendContactScan("TRANS");
         _attackSpawnPending = false;
         _attackTimer = 0;
-        _reconstructionSafeFrames = 0;
         _contactVisualConfirmed = false;
-        if (_awaitingPostTransitionMovement)
-        {
-            _awaitingPostTransitionMovement = false;
-            _postTransitionMoved = false;
-        }
-        if (!_transitionPending) _transitionOrigin = _room;
-        _transitionPending = true;
     }
 
     private void ClearInputObservations()
     {
+        _pad2Source.Reset();
         _hostSeen = _padSeen = _gameSeen = _tapSeen = 0;
         _neutralSeen = false;
         _virtualDownSeen = _virtualUpSeen = 0;
@@ -4012,43 +3866,6 @@ public sealed class CoopFeasibility : IMod
         Running,
         Completed,
         Cancelled,
-    }
-
-    private enum ProxyLocomotion
-    {
-        Idle,
-        Walk,
-        Rising,
-        Falling,
-        Crouched,
-        Attacking,
-        Hurt,
-        Downed,
-    }
-
-    private enum ProxyAnimation
-    {
-        Idle,
-        Walk,
-        JumpRise,
-        Fall,
-        Landing,
-        CrouchEnter,
-        CrouchHold,
-        CrouchExit,
-        Hurt,
-        CompactHurt,
-        AttackStartup,
-        AttackActive,
-        AttackRecovery,
-        Downed,
-    }
-
-    private enum JumpOrigin
-    {
-        Normal,
-        Coyote,
-        Buffered,
     }
 
     private enum AttackKind
@@ -4101,14 +3918,12 @@ public sealed class CoopFeasibility : IMod
     private readonly struct ProxyPose
     {
         public readonly int Index;
-        public readonly int Duration;
         public readonly ushort NativeFrame;
         public readonly ProxyHurtbox Hurtbox;
 
-        public ProxyPose(int index, int duration, ushort nativeFrame, ProxyHurtbox hurtbox)
+        public ProxyPose(int index, ushort nativeFrame, ProxyHurtbox hurtbox)
         {
             Index = index;
-            Duration = duration;
             NativeFrame = nativeFrame;
             Hurtbox = hurtbox;
         }
@@ -4290,5 +4105,7 @@ public sealed class CoopFeasibility : IMod
             hash = (hash ^ unchecked((uint)_right)) * 16777619;
             return (hash ^ unchecked((uint)_bottom)) * 16777619;
         }
+
+        public ManagedRoomKey ManagedKey() => new(_stage, _room, _area, _left, _top, _right, _bottom);
     }
 }

@@ -94,9 +94,21 @@ Durations of 255 are long looping/held managed poses. Landing, crouch entry/exit
 
 This does not implement traversal on slopes, moving platforms/elevators, water or quicksand behavior, inverted gravity, or stage-specific scripted terrain.
 
+Jump forgiveness and stance policy now run through separate allocation-free managed machines. Jump continuations are bound to one machine and a nonwrapping revision, preserving the exact four-update coyote/buffer ordering while rejecting stale, duplicate, or cross-machine completion. Standing-hull results use the same capability model, so a collision-query fault cannot commit a guessed stance. Native input sampling, collision queries, velocity, native sprite/frame/hurtbox resolution, rendering, and downstream diagnostics remain adapter responsibilities.
+
+`ManagedLocomotionReducer` owns logical locomotion/animation selection, the exact 43-pose timing catalog, frame/tick progression, one-shots, loops, transition evidence, and attack-phase countdown boundaries. `ManagedMovementSessionReducer` owns safe-update stabilization, room and transition phase, reconstruction authorization/results, manual reset, tether/collision recovery, post-transition movement acceptance, fatal/unload state, counters, and snapshot eligibility.
+
+Reconstruction candidate order is also explicit managed policy: each Y offset contains ascending distance pairs with positive X first, and standing precedes crouched at every coordinate. Runtime and tests share one allocation-free orchestration seam. Blocked candidates continue, collision faults stop immediately, and exhaustion reports no safe candidate. Success uses prepared checked coordinates, stance/jump/locomotion capabilities, pose and health projections, session completion, and diagnostics; every fallible step finishes before cross-token validation and one nonthrowing authoritative commit.
+
+### Managed Replay Identity
+
+Successful Player 2 simulation updates now capture one immutable processed-input frame and one movement-only proxy snapshot. Their identity uses a monotonic managed update ID plus a session-local room epoch; unlike the existing attack room hash, the epoch advances across transitions and repeated visits to the same room. Diagnostic resets preserve identity, reconcile same-room versus changed-room observations, and cannot reset the managed update sequence.
+
+The M4 replay/test schema v2 writes 116 canonical bytes in a fixed order with explicit little-endian integers, `0/1` booleans, bounded enum values, the ASCII `coop-managed-state` domain, and schema byte `2`. Movement-session phase is stored at offset 57 with stable wire values `1..9`; zero and unknown values fail closed. The current fixture FNV-1a 64-bit golden is `bb05d22920f8b29f`. The live hash path writes to a bounded stack span and allocates no per-update byte array. This movement-only snapshot is test/replay evidence, not a network packet, correction snapshot, persistence format, or reconnect keyframe.
+
 ## Profile-Aware Outgoing Combat
 
-Circle (`O`) and Up+Circle (`I+O`) share the existing safe 8-update startup, 4-update active pose, and 10-update recovery. At active entry, the mod chooses a stable equipped hand (left when nonempty, otherwise right), validates item range `0..168`, copies the immutable US equipment definition, and calls only the deterministic `CalcAttack` routine when required. It deliberately does **not** call `GetEquipProperties`, because that routine consumes native RNG and recomputes global Player 1 statistics. A bounded guest-stack region is saved, cleared, restored byte-for-byte, verified, and the complete CPU snapshot is restored. The one GTE-dependent item `0x8D`, empty/non-damaging profiles, unsupported pointers, invalid items, or malformed hit-state tuples cancel that attack before publication.
+Circle (`O`) and Up+Circle (`I+O`) share the existing safe 8-update startup, 4-update active pose, and 10-update recovery. At active entry, the mod chooses a stable equipped hand (left when nonempty, otherwise right), validates item range `0..168`, copies the immutable US equipment definition, and calls only the deterministic `CalcAttack` routine when required. It deliberately does **not** call `GetEquipProperties`, because that routine consumes native RNG and recomputes global Player 1 statistics. A bounded guest-stack region is saved, cleared, restored byte-for-byte, and verified. A stack-backed guard restores and verifies all 32 guest registers plus seven exposed special-register words after direct dispatch. The one GTE-dependent item `0x8D`, empty/non-damaging profiles, unsupported pointers, invalid items, or malformed hit-state tuples cancel that attack before publication.
 
 The immutable latched tuple supplies attack, element, enemy invincibility frames, stun frames, native hit state, hit effect, deterministic definition-source field, and item identity. Randomized `GetEquipProperties` output is intentionally not reproduced. The managed profiles are:
 
@@ -108,6 +120,8 @@ The immutable latched tuple supplies attack, element, enemy invincibility frames
 There is never more than one projectile or outgoing entity. A projectile keeps one exact-owned slot and native `EntityNull` update while its managed world position advances before each next collision window. Each window deactivates publication fields while mutating, revalidates room/ownership/timing, clears prior hit evidence, captures bounded compatible targets, then publishes entity ID/update/hit state last. It does not pierce.
 
 Allocation keeps the v0.3 quarantine model: marker `0x50324B43`, generation, and room hash at `+0x7C/+0x80/+0x84`; exact ownership before cleanup; valid attacker ID `0..10`; and mutation stop on ambiguous reuse. Normal collision alone may mutate targets and run death/reward behavior. The mod never calls `DealDamage` and never writes target HP, dead flags, or rewards. Compatible breakables remain eligible through centralized target bits `hitboxState & 0x3E`, rather than a hard-coded bit-2 test.
+
+Attack safety is split across testable lease and publication boundaries. `AttackLeaseMachine` owns `Empty`, `Owned`, retryable `CleanupPending`, and terminal `MutationStopped`, together with tuple/owner/nonwrapping-revision authorization and reset carry. `AttackPublicationPolicy` owns ownership-before-payload ordering, live-fields-last publication, operation journaling, projectile deactivate-mutate-republish order, target observation, synchronous rollback/retry, unload classification, and residual evidence. The adapter performs actual native probes, reads, writes, direct guest dispatch, and target observations. Observed reuse permanently stops mutation; diagnostic reset refuses atomically when cleanup authority cannot be established and preserves the existing session/generation for a later retry.
 
 ## Enemy Diagnostics and Center Cube Awareness
 
@@ -126,6 +140,12 @@ The read-only contact scan examines native stage slots `64..191`. A newly damagi
 To revive, keep Player 1 within 24 horizontal and 32 vertical pixels, hold **Player 1 Down + Player 2 Circle** continuously for 120 safe updates, and keep both players compatible, controlled, alive/same-room as required by the probe. Revive returns Player 2 at 50 HP with 120 updates of post-revive invulnerability. Releasing a button or violating a condition cancels progress. Revive proximity does **not** raycast wall occlusion yet.
 
 The scan never calls native Player 1 damage and never writes an incoming entity. Protected Player 1 runtime/status, castle flags/map, and save-workspace regions are fingerprinted before and after every scan.
+
+An allocation-free contact opportunity machine owns the 128-slot historical policy after those reads pass their guard: eligibility-driven incarnation generations, exact identity and phase changes, initial baseline, suspension/resume grace, 60-scan repeats, entry/stay/exit counters, and deterministic strongest-hit arbitration. Every simultaneous opportunity is consumed, damage is compared after clamping to 40, and equal damage retains the lower native slot. The adapter still owns scanning, geometry, fingerprints, managed-health application, knockback, animation, and attack cancellation.
+
+Managed health policy is now isolated in a pure state reducer with explicit fixed rules: 100 maximum HP, damage clamped to 40, 60-update hit protection, 18-update hurt lock, 120-update revive, recovery to 50 HP, and 120-update revive protection. Contact scanning still selects the native observation and the runtime adapter still performs knockback and attack cancellation; the reducer owns opportunity consumption, suppression, damage/downing, timers, revive progress/cancellation/recovery, reconstruction protection, counters, and invariant projection. Checked counter overflow fails closed instead of silently wrapping.
+
+Revive eligibility crosses the runtime boundary as one immutable observation containing processed P1/P2 buttons, signed distance, P1 alive/compatibility state, control availability, and room stability. Inclusive `24 x 32` distance semantics are tested independently without moving native memory reads into the pure model.
 
 ## Installation
 
@@ -201,18 +221,41 @@ P2D4 VER=0.4.0 ... VIS=P:... X=P:CLEAN:WINDOW/.../P1,42,18,20,2/E2,0,2,0/J8,8 EN
 
 Unless specified otherwise, `P` means pass, `W` means incomplete/waiting (or a nonfatal capacity warning), and `F` means a latched failure. A `P2D4` line is diagnostic evidence, not proof of universal game compatibility.
 
+### Structured Diagnostic Contract
+
+Production reports now pass through a bounded `P2D4Report` parser and canonical formatter before they are displayed, copied, printed, or captured. The parser requires the exact 23 unique keys, legal result states, printable ASCII, canonical bounded decimal values for validated fields, and selected cross-field safety invariants. It deliberately accepts valid failure evidence such as a guard check that fails before a scan commits or cleanup after a failed pre-allocation publication.
+
+The co-op provider can capture a JSON `p2d4/1` envelope containing the mod version, a per-load 32-hex session ID, diagnostic generation from `Q`, latest mod VSync frame, caller-supplied automation frame, canonical legacy line, and keyed fields. Legacy reports are bounded to 16 KiB and final structured responses to 64 KiB. A reset convention requires the exact current session and generation before routing through the existing `ResetDiagnostic()` operation.
+
+Automation protocol `1.1` exposes these operations through `sotn_get_mod_diagnostics` and `sotn_reset_mod_diagnostics`. RecompOne discovers the exact public convention methods after successful load, drops its delegates before unload, and serializes capture/reset through the runtime main-thread queue. The bridge validates the JSON object, reset identity, and final response bound independently. Reset requires confirmation and returns whether it applied; unresolved native attack cleanup or any reducer/generation exhaustion refuses before diagnostic mutation. Capture again after success to obtain the new generation. Console or log scraping is not the supported integration plan.
+
+### Canonical Automation Scenario
+
+The parent MCP assembly embeds `sotn-scenario/1` catalog scenario `coop-locomotion-jump` version `1`. After loading an ordinary supported room as Alucard and enabling mod `coop-feasibility`, run exactly one confirmed catalog command:
+
+```text
+sotn_run_scenario {"id":"coop-locomotion-jump","confirm":true}
+```
+
+The start preconditions are Play, Alucard, loading/menu/map false, active co-op hooks through `H=P`, exact `p2d4/1` diagnostics, `E=0`, and `K=-`. `H=P` is used because a separate player-control telemetry field can be unavailable in valid Play states. `K=-` deliberately requires Pad 2/native-controller mode; virtual Player 2 keyboard mode fails closed rather than mixing keyboard and MCP Pad 2 input.
+
+The catalog defines a 64-frame neutral Port 0 timeline and a Port 2 timeline of Right 12, neutral 4, Left 12, neutral 4, Cross 1, neutral 31. Ordered timeline starts are not an atomic or guaranteed same-frame two-port operation. The checkpoint checks only normal locomotion/jump evidence through `M=P`; it does not fix a stage/room or require broader coyote/buffered `J=P` evidence. The result reports a bounded outcome, first failed checkpoint and cleanup evidence, sanitized manifest, and artifact ID. Passes request state and diagnostics; failures, cancellation, indeterminate execution, or cleanup failure request bounded state, diagnostics, entities, logs, and screenshot artifacts. Keep runtime bundles private because they can expose gameplay, logs, entities, mod state, or a game-display image. The runner clears both ports in `finally`; after interruption, call `sotn_clear_input` and verify neutral telemetry. The command does not load a save, launch/stop the game, hard-reset, or reload the mod, and only one scenario may execute at once.
+
+The 2026-08-19 live smoke loaded `coop-feasibility` `v0.4.0` and began in Play/Alucard with loading/menu/map false and `K=-`, `H=P`, `E=0`. An exact diagnostic reset advanced generation `0` to `1`. The exact Port 2 sequence above, with Port 0 neutral also exercised, produced `M=P:18/18/1`, `H=P`, `E=0`, and `J=W:N1/C0/B0/R0,0` at automation frame 1912, which is the intended normal jump only. Manual inter-tool latency means this run does not establish same-frame port starts. State, diagnostics, at most 32 entities, 100 log lines, and a validated PNG were captured privately; no live bundle, image, or save was committed. Explicit clear at frame 2072 was followed by frame 2160 telemetry with both masks and remaining-frame counts zero.
+
 ## Safety Model
 
 - Player 1 remains the only native player entity. Player 2 movement, stance, timing, HP, hurt, downed, revive, and incoming damage are managed state; Player 1 movement/entity and native damage are not called or directly changed.
-- Terrain collision uses a bounded 260-byte (`0x104`) guest-stack scratch footprint during synchronous player update. Every byte is saved, cleared, restored, and verified, and the CPU context is restored. Corrections outside `-64..64`, API mismatch, and shaped/slope effects suspend or disable rather than guess.
+- Terrain collision uses a bounded 260-byte (`0x104`) guest-stack scratch footprint during synchronous player update. Every byte is saved and cleared; restoration and verification attempt all 260 bytes even after an individual memory fault. Direct guest dispatch is wrapped by a stack-backed 39-word context guard and allocates no snapshot. Corrections outside `-64..64`, API mismatch, and shaped/slope effects suspend or disable rather than guess.
 - Persistent movement uses one-pixel substeps, dense standing/crouched sensors, clearance checks, floor support validation, and bounded reconstruction candidates. Unsafe game states, transitions, menus/maps, loading, cutscenes, invalid tilemaps, and unsupported characters suspend the proxy.
 - Rendering still consumes no persistent primitive or GT4. It validates the native Player 1 body packet only as a post-stage gate, uploads one validated mapped sprite to a transient VRAM rectangle, draws one direct GP0 quad, restores the exact rectangle in `finally`, and verifies restoration every 60 submissions. Invalid tables/layout/CLUT use diagnostic geometry; a restoration verification failure trips the fatal circuit breaker because continuing after uncertain VRAM restoration is unsafe.
 - Incoming contact remains read-only over stage slots `64..191`, with before/after fingerprints for protected native state. Only managed HP and motion respond.
 - Outgoing combat is the sole intentional native entity mutation: exactly one free slot in `17..47` is transactionally ownership-marked. Contact publishes one window; a nonpiercing projectile reuses that exact slot across bounded windows. Each publication keeps live fields last; exact ownership is required before every mutation/cleanup.
+- Attack lease commands are revision-bound and unforgeable outside the reducer. Ownership mismatch enters terminal quarantine, after which no cleanup probe or write is emitted. Adapter exceptions during cancellation are contained so fatal cleanup cannot replace the original latched failure.
 - Native outgoing collision is intentionally permitted to mutate target combat state and run native death/reward/progression semantics. The mod never directly writes target HP.
-- Equipment derivation copies the immutable definition and invokes only deterministic `CalcAttack`; it never consumes native RNG or recomputes Player 1 globals. It uses a bounded saved/cleared/restored/verified guest-stack region and restores the CPU snapshot. Invalid tuples cancel before entity publication, while a failed restore trips the circuit breaker. Enemy diagnostics remain read-only.
+- Equipment derivation copies the immutable definition and invokes only deterministic `CalcAttack`; it never consumes native RNG or recomputes Player 1 globals. Its bounded 144-byte scratch and 39-word context use the same exhaustive restoration and direct-dispatch guards as collision. Invalid tuples cancel before entity publication, while a failed restore trips the circuit breaker. Enemy diagnostics remain read-only.
 - CEN awareness changes only helper `context.V0`; it never writes RAM or spoofs P1. Any exception disables only awareness. Projectile/HUD visuals are deterministic transient GP0 tiles with no native weapon-overlay replay or unvalidated sprite frames.
-- Processed Pad 2 masks are sampled once per Player 2 update. Virtual input changes only active-low runtime port `1`, replaces rather than merges hardware Pad 2 input, and is released on unsafe states or settings UI.
+- Processed Pad 2 masks are sampled once per Player 2 update. In configured Pad 2 mode, the first observed non-neutral processed Port 2 mask latches source availability until input observation or lifecycle reset, allowing bounded automation timelines without claiming a native controller connection. Virtual input changes only active-low runtime port `1`, replaces rather than merges hardware Pad 2 input, and is released on unsafe states or settings UI.
 - Hook exceptions trip a circuit breaker. Attack cancellation/cleanup is attempted without replacing the original error; quarantined ownership remains visible in `X` and `E`.
 
 These checks reduce risk on the exact supported release. They do not prove behavior for modified executables, future SymphonyRecomp versions, every enemy, every hazard, or every room.
@@ -316,13 +359,21 @@ Rollback, two complete native player contexts, split-screen, independent rooms, 
 6. Add a LAN transport probe, remote avatar snapshots, and host-authoritative movement.
 7. Synchronize combat events, pickups, bosses, progression, and reconnect keyframes.
 
-The next honest work is broader enemy/hazard/awareness coverage plus explicit camera and shared-world policy—not a claim that the bounded proxy is already complete co-op.
+The M3 data-driven scenario runner, artifact bundles, first embedded catalog command, and controlled live smoke are complete. M5 bounded playable local release validation is next. Broader hazards/awareness and camera/shared-world policy remain later work; M3/M4 closure is not a claim that the bounded proxy is already complete co-op.
 
 ## Development
 
 The implementation hooks `dra/RunMainEngine`, `dra/UpdatePlayerEntities`, `dra/RenderEntities`, `main/DrawOTag`, and three generated `cen` player-distance/side helpers; observes `VSyncEvent`, `PadReadEvent`, `PlayerLoadedEvent`, and `RoomLayerLoadEvent`; synchronously calls validated terrain-collision, deterministic attack-calculation, and attacker-ID routines; resolves immutable poses through validated US runtime sprite tables; scans native stage geometry through a read-only RAM view; transactionally publishes one bounded native attack/effect entity; and renders one direct GP0 textured avatar plus transient marker/HUD geometry after the stage ordering table.
 
-The source is dynamically compile-checked against the exact SymphonyRecomp `v0.4.3b` APIs and the current local development runtime using .NET 10. Gameplay validation still requires SymphonyRecomp and a legally owned US game copy.
+The repository-owned validation gate compile-checks the real mod source through the runtime `ModCompiler` against the exact SymphonyRecomp `v0.4.3b` APIs and the current-tested development APIs using .NET 10. It also validates the strict manifest, source/report version agreement, exact hook set, compatibility constants, and the prohibition on direct native target damage. From a normal `mods/coop` checkout inside SymphonyRecomp, run:
+
+```bash
+bash tools/validate.sh
+```
+
+Pass `--current-root` and `--pinned-root` to use explicit source checkouts. The default pinned check materializes only public source from the local Git object databases under ignored `obj/`; CI checks out the exact revisions declared in `.github/workflows/validate.yml`. The gate does not use generated game source, a disc image, saves, or packaged game binaries. Gameplay validation still requires SymphonyRecomp and a legally owned US game copy.
+
+The final M4 focused gate contains 196 tests: diagnostics 20, managed state 16, health 13, attack lease 16, attack publication 29, contact opportunity 15, jump forgiveness 15, stance 12, reconstruction policy 16, movement session 23, locomotion 16, and integrated replay closure 5. The added processed-Pad-2 source-latch suite contains 7 tests, making the current complete co-op gate 203 tests. Current and pinned validation additionally execute production-shared direct-dispatch/context and scratch-restoration probes; after the latch update both runtime compilations produced a 192512-byte dynamic mod assembly.
 
 The repository contains no copyrighted game assets or game image.
 

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <WarningsAsErrors>CS0168;CS0219;CS1998</WarningsAsErrors>
+  </PropertyGroup>
+  <Target Name="ValidateRuntimeReferenceRoot" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(RuntimeReferenceRoot)' == ''" Text="Pass -p:RuntimeReferenceRoot=/path/to/published/runtime." />
+    <Error Condition="!Exists('$(RuntimeReferenceRoot)/RecompOne.Runtime.dll')" Text="RuntimeReferenceRoot does not contain RecompOne.Runtime.dll." />
+    <Error Condition="'$(SymphonyRecompRoot)' == ''" Text="Pass -p:SymphonyRecompRoot=/path/to/SymphonyRecomp." />
+  </Target>
+  <ItemGroup>
+    <_RuntimeAssembly Include="$(RuntimeReferenceRoot)/*.dll" />
+    <Reference Include="@(_RuntimeAssembly)" />
+    <Compile Include="$(SymphonyRecompRoot)/wrapers/*.cs" Link="wrapers/%(Filename)%(Extension)" />
+    <Compile Include="$(SymphonyRecompRoot)/events/*.cs" Link="events/%(Filename)%(Extension)" />
+    <Compile Include="../../source/**/*.cs" Link="coop/%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+</Project>

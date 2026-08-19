@@ -1,0 +1,52 @@
+name: Validate co-op mod
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out co-op mod
+        uses: actions/checkout@v4
+
+      - name: Check out current-tested SymphonyRecomp
+        uses: actions/checkout@v4
+        with:
+          repository: mojomast/SymphonyRecomp
+          ref: a2694df874e2346384a5afa9e1734d2dde6a9d27
+          path: .deps/current
+
+      - name: Check out current-tested RecompOne
+        uses: actions/checkout@v4
+        with:
+          repository: mojomast/RecompOne
+          ref: f6e47c4c515c57f7c523cdbaa68b8e9bf8994500
+          path: .deps/current/RecompOne
+
+      - name: Check out supported SymphonyRecomp v0.4.3b
+        uses: actions/checkout@v4
+        with:
+          repository: BlackLabelHQ/SymphonyRecomp
+          ref: c1037ded877f60588a162675fa558415bf6c1995
+          path: .deps/v0.4.3b
+
+      - name: Check out supported RecompOne runtime
+        uses: actions/checkout@v4
+        with:
+          repository: BlackLabelHQ/RecompOne
+          ref: 9c5d7fced450549b6a8874e4fa9a4accae1eb138
+          path: .deps/v0.4.3b/RecompOne
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate current and supported APIs
+        run: bash tools/validate.sh --current-root "$GITHUB_WORKSPACE/.deps/current" --pinned-root "$GITHUB_WORKSPACE/.deps/v0.4.3b"

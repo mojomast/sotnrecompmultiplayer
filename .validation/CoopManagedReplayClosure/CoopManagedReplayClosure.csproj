@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../source/ManagedReplayState.cs" Link="ManagedReplayState.cs" />
+    <Compile Include="../../source/ManagedMovementSessionState.cs" Link="ManagedMovementSessionState.cs" />
+    <Compile Include="../../source/JumpForgivenessState.cs" Link="JumpForgivenessState.cs" />
+    <Compile Include="../../source/ManagedStanceState.cs" Link="ManagedStanceState.cs" />
+    <Compile Include="../../source/ManagedLocomotionState.cs" Link="ManagedLocomotionState.cs" />
+    <Compile Include="../../source/ManagedHealthState.cs" Link="ManagedHealthState.cs" />
+    <Compile Include="../../source/ReconstructionPolicyState.cs" Link="ReconstructionPolicyState.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+</Project>
