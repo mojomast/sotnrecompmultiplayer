@@ -1,8 +1,8 @@
 {
   "id": "coop-feasibility",
   "name": "Co-op Feasibility Probe",
-  "version": "0.1.5",
+  "version": "0.4.0",
   "author": "mojomast",
-  "description": "Tests controller 2 input, proxy movement, terrain collision, native sprite replay, and read-only enemy contact detection without changing persistent game state.",
+  "description": "Experimental same-room P2 proxy with equipment-derived melee/projectile combat, bounded enemy diagnostics and CEN awareness, managed health/revive, and a fixed combat HUD.",
   "dependencies": []
 }
