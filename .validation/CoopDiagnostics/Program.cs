@@ -35,6 +35,22 @@ var tests = new List<(string Name, Action Run)>
                 JsonValueKind.False or JsonValueKind.String))
                 throw new InvalidOperationException($"Metric {metric.Name} is not scalar.");
     }),
+    ("transition trace room identity and bounds serialize", () =>
+    {
+        var origin = new ManagedRoomKey(17, 34, 51, -64, 128, 448, 608);
+        var current = new ManagedRoomKey(68, 85, 102, 16, -32, 336, 208);
+        var trace = new[]
+        {
+            new MovementTransitionTraceEntry(123, MovementTransitionTraceSource.RoomLayer, origin, current,
+                true, false, "selected", "none")
+        };
+        string json = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden), new string('a', 32), 0, 30, 40,
+            EmptyMetrics(), trace);
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement entry = document.RootElement.GetProperty("transitionTrace")[0];
+        AssertRoom(entry.GetProperty("origin"), 17, 51, 34, -64, 128, 448, 608);
+        AssertRoom(entry.GetProperty("current"), 68, 102, 85, 16, -32, 336, 208);
+    }),
     ("envelope generation mismatch rejected", () => RejectEnvelope(1)),
     ("duplicate key rejected", () => Reject(Golden.Replace(" H=W:0/0/0/0/0", " H=W:0/0/0/0/0 H=W:0/0/0/0/0"))),
     ("missing key rejected", () => Reject(Golden.Replace(" HU=W:E0/S0", ""))),
@@ -110,6 +126,17 @@ static void RejectEnvelope(int generation)
         return;
     }
     throw new InvalidOperationException("Inconsistent envelope was accepted.");
+}
+
+static void AssertRoom(JsonElement room, int stage, int area, int number, int left, int top, int right, int bottom)
+{
+    Equal(stage, room.GetProperty("stage").GetInt32());
+    Equal(area, room.GetProperty("area").GetInt32());
+    Equal(number, room.GetProperty("room").GetInt32());
+    Equal(left, room.GetProperty("left").GetInt32());
+    Equal(top, room.GetProperty("top").GetInt32());
+    Equal(right, room.GetProperty("right").GetInt32());
+    Equal(bottom, room.GetProperty("bottom").GetInt32());
 }
 
 static P2D4Metrics EmptyMetrics() => new(

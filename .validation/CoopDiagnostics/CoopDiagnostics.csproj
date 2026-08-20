@@ -8,6 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../source/ManagedMovementSessionState.cs" Link="ManagedMovementSessionState.cs" />
+    <Compile Include="../../source/ManagedReplayState.cs" Link="ManagedReplayState.cs" />
+    <Compile Include="../../source/MovementTransitionTrace.cs" Link="MovementTransitionTrace.cs" />
     <Compile Include="../../source/P2D4Report.cs" Link="P2D4Report.cs" />
     <Compile Include="../../source/VirtualKeyboardPreference.cs" Link="VirtualKeyboardPreference.cs" />
     <Compile Include="Program.cs" />

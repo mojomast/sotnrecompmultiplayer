@@ -46,8 +46,8 @@ public readonly struct MovementTransitionTraceEntry
 {
     public long Frame { get; }
     public MovementTransitionTraceSource EventSource { get; }
-    public ManagedRoomKey Origin { get; }
-    public ManagedRoomKey Current { get; }
+    public MovementTransitionTraceRoom Origin { get; }
+    public MovementTransitionTraceRoom Current { get; }
     public bool TransitionPending { get; }
     public bool AwaitingPostTransitionMovement { get; }
     public string Reconstruction { get; }
@@ -59,11 +59,34 @@ public readonly struct MovementTransitionTraceEntry
     {
         Frame = frame;
         EventSource = eventSource;
-        Origin = origin;
-        Current = current;
+        Origin = new MovementTransitionTraceRoom(origin);
+        Current = new MovementTransitionTraceRoom(current);
         TransitionPending = transitionPending;
         AwaitingPostTransitionMovement = awaitingPostTransitionMovement;
         Reconstruction = reconstruction;
         Retry = retry;
+    }
+}
+
+// Trace-only JSON shape; ManagedRoomKey uses fields for allocation-free movement state.
+public readonly struct MovementTransitionTraceRoom
+{
+    public byte Stage { get; }
+    public byte Area { get; }
+    public byte Room { get; }
+    public int Left { get; }
+    public int Top { get; }
+    public int Right { get; }
+    public int Bottom { get; }
+
+    internal MovementTransitionTraceRoom(ManagedRoomKey room)
+    {
+        Stage = room.Stage;
+        Area = room.Area;
+        Room = room.Room;
+        Left = room.Left;
+        Top = room.Top;
+        Right = room.Right;
+        Bottom = room.Bottom;
     }
 }
