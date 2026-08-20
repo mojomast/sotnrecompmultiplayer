@@ -106,6 +106,29 @@ var tests = new List<(string Name, Action Run)>
             }
         }
     }),
+    ("player-load reconciliation accepts stale room bounds refresh", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(44));
+        var staleRoom44 = new ManagedRoomKey(1, 44, 0, 16, 0, 272, 240);
+        session.PlayerReloaded();
+        ulong reloadEpoch = session.RoomEpoch;
+        session.RoomLayerLoaded();
+        session.ObserveSafeRoom(staleRoom44);
+
+        True(session.State.Room.Equals(staleRoom44));
+        ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
+        False(destination.ReconstructionRequested);
+        Equal(reloadEpoch, session.RoomEpoch);
+        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
+        Equal(0, session.State.CompletedTransitions);
+        Equal(0, session.State.TransitionPendingUpdates);
+
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        Equal(reloadEpoch, session.RoomEpoch);
+        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
+        Equal(0, session.State.CompletedTransitions);
+    }),
     ("post-reconciliation room changes remain normal transitions", () =>
     {
         ManagedMovementSessionReducer session = Active(Room(44));

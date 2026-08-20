@@ -617,7 +617,7 @@ public sealed class ManagedMovementSessionReducer
     private void ReconcilePlayerLoadInitialRoom(ManagedRoomKey room)
     {
         if (!_playerLoadReconciliationPending) return;
-        if (_playerLoadKnownRoom.Equals(room))
+        if (_playerLoadKnownRoom.SameRoomAs(room))
         {
             _playerLoadStaleRoomObserved = true;
             return;
