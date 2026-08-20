@@ -64,34 +64,65 @@ var tests = new List<(string Name, Action Run)>
         False(session.State.TransitionPending);
         Equal(0, session.State.CompletedTransitions);
     }),
-    ("player-load initial layer discards stale room evidence without transition obligations", () =>
+    ("player-load reconciliation accepts stale evidence in both layer orderings", () =>
     {
-        foreach (ManagedMovementReconstructionResult result in new[]
+        foreach (bool staleBeforeLayer in new[] { true, false })
         {
-            ManagedMovementReconstructionResult.Selected,
-            ManagedMovementReconstructionResult.NoSafeCandidate,
-        })
-        {
-            ManagedMovementSessionReducer session = Active(Room(44));
-            session.PlayerReloaded();
-            ulong reloadEpoch = session.RoomEpoch;
-            session.ObserveSafeRoom(Room(44)); // Stale pre-layer room observation.
-            session.RoomLayerLoaded();
+            foreach (ManagedMovementReconstructionResult result in new[]
+            {
+                ManagedMovementReconstructionResult.Selected,
+                ManagedMovementReconstructionResult.NoSafeCandidate,
+            })
+            {
+                ManagedMovementSessionReducer session = Active(Room(44));
+                session.PlayerReloaded();
+                ulong reloadEpoch = session.RoomEpoch;
+                if (staleBeforeLayer)
+                {
+                    session.ObserveSafeRoom(Room(44)); // Stale pre-layer room observation.
+                    session.RoomLayerLoaded();
+                }
+                else
+                {
+                    session.RoomLayerLoaded();
+                    session.ObserveSafeRoom(Room(44)); // Stale post-layer room observation.
+                }
 
-            Equal(1, session.State.RoomLayerEvents);
-            Equal(reloadEpoch, session.RoomEpoch);
-            False(session.State.RoomKnown || session.State.ProxyInitialized || session.State.TransitionPending);
-            Equal(ManagedMovementSessionPhase.WaitingForSafeUpdate, session.State.Phase);
+                Equal(1, session.State.RoomLayerEvents);
+                Equal(reloadEpoch, session.RoomEpoch);
+                False(session.State.ProxyInitialized || session.State.TransitionPending);
 
-            ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-            session.CompleteReconstruction(reconstruction.Reconstruction, result);
+                ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
+                False(destination.ReconstructionRequested);
+                False(session.State.TransitionPending);
+                ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+                session.CompleteReconstruction(reconstruction.Reconstruction, result);
 
-            Equal(reloadEpoch, session.RoomEpoch);
-            Equal(0, session.State.CompletedTransitions);
-            False(session.State.AwaitingPostTransitionMovement);
-            Equal(0, session.State.PostTransitionAbandonments);
-            Equal(0, session.State.TransitionReconstructionFailures);
+                Equal(reloadEpoch, session.RoomEpoch);
+                Equal(0, session.State.CompletedTransitions);
+                False(session.State.AwaitingPostTransitionMovement);
+                Equal(0, session.State.PostTransitionAbandonments);
+                Equal(0, session.State.TransitionReconstructionFailures);
+            }
         }
+    }),
+    ("post-reconciliation room changes remain normal transitions", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(44));
+        session.PlayerReloaded();
+        session.RoomLayerLoaded();
+        session.ObserveSafeRoom(Room(44));
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        ulong destinationEpoch = session.RoomEpoch;
+
+        ManagedMovementSessionTransition changed = session.ObserveSafeRoom(Room(220));
+        False(changed.ReconstructionRequested);
+        True(session.State.TransitionPending);
+        Equal(destinationEpoch + 1, session.RoomEpoch);
+        SettleSelected(session, Room(220));
+        Equal(1, session.State.CompletedTransitions);
+        True(session.State.AwaitingPostTransitionMovement);
     }),
     ("player-load layer latch is consumed once", () =>
     {

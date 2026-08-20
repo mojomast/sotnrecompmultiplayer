@@ -191,7 +191,10 @@ public sealed class ManagedMovementSessionReducer
     private ManagedMovementSessionPhase _phase = ManagedMovementSessionPhase.Dormant;
     private bool _roomKnown;
     private bool _playerLoadInitialLayerPending;
+    private bool _playerLoadReconciliationPending;
+    private bool _playerLoadStaleRoomObserved;
     private ManagedRoomKey _room;
+    private ManagedRoomKey _playerLoadKnownRoom;
     private ManagedRoomKey _transitionOrigin;
     private int _safeUpdates;
     private int _roomStableUpdates;
@@ -249,6 +252,8 @@ public sealed class ManagedMovementSessionReducer
         if (_pendingReconstructionRevision != 0)
             throw new InvalidOperationException("A reconstruction result is still pending.");
         bool roomChanges = _roomKnown && !_room.SameRoomAs(room);
+        bool playerLoadDestinationReconciliation = _playerLoadReconciliationPending &&
+            _playerLoadStaleRoomObserved && roomChanges;
         int projectedSafe = roomChanges ? 1 : IncrementSaturating(_safeUpdates);
         bool willRequest = (!_proxyInitialized || _manualResetPending) &&
             projectedSafe >= StabilizationUpdates;
@@ -258,7 +263,8 @@ public sealed class ManagedMovementSessionReducer
         if (_transitionPending) _ = IncrementChecked(_transitionPendingUpdates);
         if (roomChanges && _awaitingPostTransitionMovement)
             _ = IncrementChecked(_postTransitionAbandonments);
-        if (roomChanges && !_transitionPending && _roomEpoch.Epoch == ulong.MaxValue)
+        if (roomChanges && !playerLoadDestinationReconciliation && !_transitionPending &&
+            _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         ObserveRoom(room);
@@ -476,6 +482,9 @@ public sealed class ManagedMovementSessionReducer
         AdvanceRevision();
         _roomEpoch.InvalidateForPlayerReload();
         _playerLoadInitialLayerPending = true;
+        _playerLoadReconciliationPending = _roomKnown;
+        _playerLoadStaleRoomObserved = false;
+        _playerLoadKnownRoom = _room;
         _roomKnown = false;
         _room = default;
         _transitionPending = false;
@@ -507,6 +516,9 @@ public sealed class ManagedMovementSessionReducer
         _revision = command.NextRevision;
         _roomEpoch.MarkDiagnosticReset();
         _playerLoadInitialLayerPending = false;
+        _playerLoadReconciliationPending = false;
+        _playerLoadStaleRoomObserved = false;
+        _playerLoadKnownRoom = default;
         _roomKnown = false;
         _room = default;
         _roomStableUpdates = 0;
@@ -567,10 +579,22 @@ public sealed class ManagedMovementSessionReducer
             _roomEpoch.ReconcileAfterDiagnosticReset(room);
             _roomKnown = true;
             _roomStableUpdates = 1;
+            ReconcilePlayerLoadInitialRoom(room);
             return;
         }
         if (!_room.SameRoomAs(room))
         {
+            if (_playerLoadReconciliationPending && _playerLoadStaleRoomObserved)
+            {
+                _room = room;
+                _roomEpoch.ReconcileAfterDiagnosticReset(room);
+                _roomStableUpdates = 1;
+                _safeUpdates = 0;
+                _proxyInitialized = false;
+                _pendingReconstructionRevision = 0;
+                ClearPlayerLoadReconciliation();
+                return;
+            }
             BeginTransition();
             _room = room;
             _roomEpoch.Observe(room);
@@ -588,6 +612,24 @@ public sealed class ManagedMovementSessionReducer
             _safeUpdates = 0;
         }
         _roomStableUpdates = IncrementSaturating(_roomStableUpdates);
+    }
+
+    private void ReconcilePlayerLoadInitialRoom(ManagedRoomKey room)
+    {
+        if (!_playerLoadReconciliationPending) return;
+        if (_playerLoadKnownRoom.Equals(room))
+        {
+            _playerLoadStaleRoomObserved = true;
+            return;
+        }
+        ClearPlayerLoadReconciliation();
+    }
+
+    private void ClearPlayerLoadReconciliation()
+    {
+        _playerLoadReconciliationPending = false;
+        _playerLoadStaleRoomObserved = false;
+        _playerLoadKnownRoom = default;
     }
 
     private void BeginTransition()
