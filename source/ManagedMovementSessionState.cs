@@ -49,6 +49,7 @@ public readonly struct ManagedMovementSessionState
     public readonly ManagedMovementSessionPhase Phase;
     public readonly bool RoomKnown;
     public readonly ManagedRoomKey Room;
+    public readonly ManagedRoomKey TransitionOrigin;
     public readonly int SafeUpdates;
     public readonly int RoomStableUpdates;
     public readonly bool TransitionPending;
@@ -73,7 +74,7 @@ public readonly struct ManagedMovementSessionState
     public readonly int TransitionReconstructionFailures;
 
     internal ManagedMovementSessionState(ulong revision, ManagedMovementSessionPhase phase,
-        bool roomKnown, ManagedRoomKey room, int safeUpdates, int roomStableUpdates,
+        bool roomKnown, ManagedRoomKey room, ManagedRoomKey transitionOrigin, int safeUpdates, int roomStableUpdates,
         bool transitionPending, bool proxyInitialized, bool manualResetPending,
         bool reconstructionHardFailure, bool awaitingPostTransitionMovement,
         bool postTransitionMoved, long postTransitionCommandedRaw, int reconstructionAttempts,
@@ -87,6 +88,7 @@ public readonly struct ManagedMovementSessionState
         Phase = phase;
         RoomKnown = roomKnown;
         Room = room;
+        TransitionOrigin = transitionOrigin;
         SafeUpdates = safeUpdates;
         RoomStableUpdates = roomStableUpdates;
         TransitionPending = transitionPending;
@@ -219,7 +221,7 @@ public sealed class ManagedMovementSessionReducer
         _roomEpoch = roomEpoch ?? throw new ArgumentNullException(nameof(roomEpoch));
     }
 
-    public ManagedMovementSessionState State => new(_revision, _phase, _roomKnown, _room,
+    public ManagedMovementSessionState State => new(_revision, _phase, _roomKnown, _room, _transitionOrigin,
         _safeUpdates, _roomStableUpdates, _transitionPending, _proxyInitialized,
         _manualResetPending, _reconstructionHardFailure, _awaitingPostTransitionMovement,
         _postTransitionMoved, _postTransitionCommandedRaw, _reconstructionAttempts,

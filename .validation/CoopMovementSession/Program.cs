@@ -177,6 +177,68 @@ var tests = new List<(string Name, Action Run)>
             ManagedMovementReconstructionResult.NoSafeCandidate);
         Equal(1, failed.State.TransitionReconstructionFailures);
     }),
+    ("late layer after changed completion abandons without another completion", () =>
+    {
+        ManagedMovementSessionReducer session = ChangedRoomTransition();
+        Equal(1, session.State.CompletedTransitions);
+        True(session.State.AwaitingPostTransitionMovement);
+
+        session.RoomLayerLoaded();
+        Equal(1, session.State.PostTransitionAbandonments);
+        SettleSelected(session, Room(2));
+
+        Equal(1, session.State.CompletedTransitions);
+        False(session.State.AwaitingPostTransitionMovement);
+    }),
+    ("repeated no-safe-candidate retries remain distinct", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        for (int retry = 0; retry < 3; retry++)
+        {
+            ManagedMovementSessionTransition reconstruction = Trigger(session, Room(1));
+            session.CompleteReconstruction(reconstruction.Reconstruction,
+                ManagedMovementReconstructionResult.NoSafeCandidate);
+        }
+
+        Equal(3, session.State.ReconstructionAttempts);
+        Equal(3, session.State.ReconstructionFailures);
+        True(session.State.ReconstructionHardFailure);
+    }),
+    ("transient 140 220 140 220 produces two distinct completions", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(1));
+        ManagedRoomKey room140 = Room(140);
+        ManagedRoomKey room220 = Room(220);
+        SettleSelected(session, room140);
+        Equal(1, session.State.CompletedTransitions);
+
+        ObserveSelected(session, room220);
+        ObserveSelected(session, room140);
+        SettleSelected(session, room220);
+
+        Equal(2, session.State.CompletedTransitions);
+        Equal(1, session.State.PostTransitionAbandonments);
+        True(session.State.AwaitingPostTransitionMovement);
+    }),
+    ("transition trace is bounded and retains reconstruction outcomes", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(1));
+        var trace = new MovementTransitionTrace();
+        for (int index = 0; index < MovementTransitionTrace.Capacity; index++)
+        {
+            trace.Record(index, MovementTransitionTraceSource.SafeRoom, session.State, Room((byte)(2 + index)),
+                "none", "none");
+        }
+        trace.Record(MovementTransitionTrace.Capacity, MovementTransitionTraceSource.Reconstruction,
+            session.State, Room((byte)(MovementTransitionTrace.Capacity + 1)), "NoSafeCandidate", "retry");
+
+        MovementTransitionTraceEntry[] entries = trace.Snapshot();
+        Equal(MovementTransitionTrace.Capacity, entries.Length);
+        Equal(MovementTransitionTraceSource.Reconstruction, entries[^1].EventSource);
+        Equal("NoSafeCandidate", entries[^1].Reconstruction);
+        False(entries[^1].TransitionPending);
+        Equal((byte)(MovementTransitionTrace.Capacity + 1), entries[^1].Current.Room);
+    }),
     ("reload reset fatal and unload phases fail closed", () =>
     {
         ManagedMovementSessionReducer session = Active(Room(1));
@@ -451,6 +513,20 @@ static ManagedMovementSessionReducer ChangedRoomTransition()
     while (session.State.RoomStableUpdates < ManagedMovementSessionReducer.TransitionStableUpdates)
         session.ObserveSafeRoom(Room(2));
     return session;
+}
+
+static void SettleSelected(ManagedMovementSessionReducer session, ManagedRoomKey room)
+{
+    ObserveSelected(session, room);
+    while (session.State.TransitionPending)
+        ObserveSelected(session, room);
+}
+
+static void ObserveSelected(ManagedMovementSessionReducer session, ManagedRoomKey room)
+{
+    ManagedMovementSessionTransition transition = session.ObserveSafeRoom(room);
+    if (transition.ReconstructionRequested)
+        session.CompleteReconstruction(transition.Reconstruction, ManagedMovementReconstructionResult.Selected);
 }
 
 static void Cycle(ManagedMovementSessionReducer session, ManagedRoomKey room)

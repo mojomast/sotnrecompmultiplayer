@@ -22,6 +22,7 @@ var tests = new List<(string Name, Action Run)>
         Equal(0, document.RootElement.GetProperty("generation").GetInt32());
         Equal(Golden, document.RootElement.GetProperty("legacy").GetString());
         Equal(23, document.RootElement.GetProperty("fields").EnumerateObject().Count());
+        Equal(JsonValueKind.Null, document.RootElement.GetProperty("transitionTrace").ValueKind);
         JsonElement metrics = document.RootElement.GetProperty("metrics");
         Equal(99, metrics.EnumerateObject().Count());
         Equal(JsonValueKind.Number, metrics.GetProperty("sessionRoomEpoch").ValueKind);

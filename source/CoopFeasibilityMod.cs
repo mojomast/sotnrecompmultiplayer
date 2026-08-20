@@ -148,6 +148,7 @@ public sealed class CoopFeasibility : IMod
     private int _diagnosticGeneration;
     private readonly string _diagnosticSessionId = Guid.NewGuid().ToString("N");
     private long _diagnosticFrame;
+    private readonly MovementTransitionTrace _transitionTrace = new();
     private int _proxyResetRequests => _movementSession.State.ManualResetRequests;
     private int _proxyResetCompletions => _movementSession.State.ManualResetCompletions;
 
@@ -660,7 +661,7 @@ public sealed class CoopFeasibility : IMod
     {
         P2D4Report report = P2D4Report.Parse(BuildReport());
         return P2D4DiagnosticsEnvelope.Serialize(report, _diagnosticSessionId, _diagnosticGeneration,
-            _diagnosticFrame, automationFrame, BuildMetrics());
+            _diagnosticFrame, automationFrame, BuildMetrics(), _transitionTrace.Snapshot());
     }
 
     private P2D4Metrics BuildMetrics()
@@ -946,6 +947,8 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             BeginTransition();
             _movementSession.RoomLayerLoaded();
+            TraceTransition(MovementTransitionTraceSource.RoomLayer, _movementSession.State.Room,
+                "none", "cleared");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
@@ -1144,7 +1147,11 @@ public sealed class CoopFeasibility : IMod
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
                 _fatal ? TetherLifecycle.Fatal : TetherLifecycle.Inactive,
                 CurrentUnsafeTetherReason()));
+            ManagedMovementSessionPhase phaseBeforeUnsafe = _movementSession.State.Phase;
             _movementSession.ObserveUnsafe();
+            if (phaseBeforeUnsafe != ManagedMovementSessionPhase.WaitingForSafeUpdate)
+                TraceTransition(MovementTransitionTraceSource.Unsafe, _movementSession.State.Room,
+                    "none", "none");
             ClearJumpForgiveness();
             if (_reinitializeRequested)
                 _operationStatus = $"Proxy reset blocked: {_safeReason}";
@@ -1168,13 +1175,21 @@ public sealed class CoopFeasibility : IMod
                 TetherLifecycle.Active, _reconstructionRetry.Reason));
             if (retry.Command != ReconstructionRetryCommand.Retry)
             {
+                TraceTransition(MovementTransitionTraceSource.Retry, observedRoom.ManagedKey(), "none",
+                    retry.Command.ToString());
                 SuspendContactScan("RETRY_WAIT");
                 return;
             }
             retryProbe = true;
         }
         _room = observedRoom;
+        ManagedMovementSessionState beforeMovement = _movementSession.State;
         ManagedMovementSessionTransition movement = _movementSession.ObserveSafeRoom(observedRoom.ManagedKey());
+        if (!beforeMovement.RoomKnown || !beforeMovement.Room.Equals(observedRoom.ManagedKey()) ||
+            movement.ReconstructionRequested ||
+            beforeMovement.CompletedTransitions != movement.State.CompletedTransitions)
+            TraceTransition(MovementTransitionTraceSource.SafeRoom, observedRoom.ManagedKey(),
+                movement.ReconstructionRequested ? "requested" : "none", retryProbe ? "retry" : "none");
         if (roomChanged)
         {
             _locomotionState.Invalidate();
@@ -1196,6 +1211,8 @@ public sealed class CoopFeasibility : IMod
             if (reconstruction != ReconstructionRunResult.Selected)
             {
                 ArmReconstructionRetry();
+                TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
+                    reconstruction.ToString(), _reconstructionRetry.Active ? "armed" : "terminal");
                 if (_collisionQueryFailed || _collisionDisabled)
                 {
                     _safeFrame = false;
@@ -1207,6 +1224,8 @@ public sealed class CoopFeasibility : IMod
             }
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
+            TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
+                reconstruction.ToString(), "cleared");
             if (requested)
             {
                 _operationStatus = "Proxy reset completed beside Player 1";
@@ -2822,6 +2841,7 @@ public sealed class CoopFeasibility : IMod
         SuspendContactScan("RECON");
         _movementSession.BeginRecovery(reason == "TETHER"
             ? ManagedMovementRecoveryKind.Tether : ManagedMovementRecoveryKind.Collision);
+        TraceTransition(MovementTransitionTraceSource.Recovery, _movementSession.State.Room, "none", "cleared");
         _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
         _reconstructionTriggerReason = reason switch
         {
@@ -2852,6 +2872,10 @@ public sealed class CoopFeasibility : IMod
         _reconstructionStatus = _collisionDisabled
             ? "COLLISION:TERMINAL" : $"SUSPENDED:RETRY-{_reconstructionRetry.CooldownRemaining}";
     }
+
+    private void TraceTransition(MovementTransitionTraceSource source, ManagedRoomKey current,
+        string reconstruction, string retry) => _transitionTrace.Record(_diagnosticFrame, source,
+        _movementSession.State, current, reconstruction, retry);
 
     private static int AnimationFrameCount(ManagedAnimation animation) =>
         ManagedLocomotionCatalog.FrameCount(animation);

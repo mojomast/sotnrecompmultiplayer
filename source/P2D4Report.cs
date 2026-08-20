@@ -240,7 +240,7 @@ public static class P2D4DiagnosticsEnvelope
     public const int MaximumUtf8Bytes = 64 * 1024;
 
     public static string Serialize(P2D4Report report, string sessionId, int generation, long modFrame,
-        long automationFrame, P2D4Metrics metrics)
+        long automationFrame, P2D4Metrics metrics, object? transitionTrace = null)
     {
         ArgumentNullException.ThrowIfNull(metrics);
         if (sessionId.Length != 32 || sessionId.Any(character => !IsHexDigit(character)))
@@ -260,7 +260,8 @@ public static class P2D4DiagnosticsEnvelope
             automationFrame,
             legacy = report.CanonicalLine,
             fields = report.Fields,
-            metrics
+            metrics,
+            transitionTrace
         }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
         if (Encoding.UTF8.GetByteCount(json) > MaximumUtf8Bytes)
             throw new InvalidOperationException("Structured diagnostics exceed the response bound.");
