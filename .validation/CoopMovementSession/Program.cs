@@ -97,10 +97,17 @@ var tests = new List<(string Name, Action Run)>
         ManagedMovementSessionReducer session = Active(Room(1));
         var scrolledA = new ManagedRoomKey(1, 2, 0, 0, 0, 256, 240);
         var scrolledB = new ManagedRoomKey(1, 2, 0, 32, 0, 288, 240);
+        for (int update = 0; update < 10; update++)
+        {
+            ManagedMovementSessionTransition churn = session.ObserveSafeRoom(
+                (update & 1) == 0 ? scrolledA : scrolledB);
+            False(churn.ReconstructionRequested);
+        }
+        True(session.State.TransitionPending);
+        Equal(0, session.State.CompletedTransitions);
         for (int update = 0; update < 60; update++)
         {
-            ManagedMovementSessionTransition next = session.ObserveSafeRoom(
-                (update & 1) == 0 ? scrolledA : scrolledB);
+            ManagedMovementSessionTransition next = session.ObserveSafeRoom(scrolledB);
             if (next.ReconstructionRequested)
                 session.CompleteReconstruction(next.Reconstruction, ManagedMovementReconstructionResult.Selected);
         }

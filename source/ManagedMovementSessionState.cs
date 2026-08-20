@@ -556,7 +556,13 @@ public sealed class ManagedMovementSessionReducer
             _pendingReconstructionRevision = 0;
             return;
         }
-        _room = room;
+        if (!_room.Equals(room))
+        {
+            // Bounds churn within one room (door scroll, camera drift) is not a transition, but
+            // reconstruction must still wait for settled terrain before selecting a candidate.
+            _room = room;
+            _safeUpdates = 0;
+        }
         _roomStableUpdates = IncrementSaturating(_roomStableUpdates);
     }
 
