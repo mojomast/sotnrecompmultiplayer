@@ -190,6 +190,7 @@ public sealed class ManagedMovementSessionReducer
     private ulong _revision = 1;
     private ManagedMovementSessionPhase _phase = ManagedMovementSessionPhase.Dormant;
     private bool _roomKnown;
+    private bool _playerLoadInitialLayerPending;
     private ManagedRoomKey _room;
     private ManagedRoomKey _transitionOrigin;
     private int _safeUpdates;
@@ -440,11 +441,30 @@ public sealed class ManagedMovementSessionReducer
         RequireOperational();
         int events = IncrementChecked(_roomLayerEvents);
         if (_awaitingPostTransitionMovement) _ = IncrementChecked(_postTransitionAbandonments);
-        if (_roomKnown && !_transitionPending && _roomEpoch.Epoch == ulong.MaxValue)
+        if (!_playerLoadInitialLayerPending && !_transitionPending && _roomEpoch.Known &&
+            _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         _roomLayerEvents = events;
-        if (_roomKnown) BeginTransition();
+        if (_playerLoadInitialLayerPending)
+        {
+            _playerLoadInitialLayerPending = false;
+            _roomKnown = false;
+            _room = default;
+            _transitionOrigin = default;
+            _transitionPending = false;
+            _transitionPendingUpdates = 0;
+            _awaitingPostTransitionMovement = false;
+            _postTransitionMoved = false;
+            _postTransitionCommandedRaw = 0;
+            _proxyInitialized = false;
+            _safeUpdates = 0;
+            _roomStableUpdates = 0;
+            _pendingReconstructionRevision = 0;
+            _phase = ManagedMovementSessionPhase.WaitingForSafeUpdate;
+            return;
+        }
+        BeginTransition();
         InvalidateProxyForTransition();
     }
 
@@ -455,6 +475,7 @@ public sealed class ManagedMovementSessionReducer
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         _roomEpoch.InvalidateForPlayerReload();
+        _playerLoadInitialLayerPending = true;
         _roomKnown = false;
         _room = default;
         _transitionPending = false;
@@ -485,6 +506,7 @@ public sealed class ManagedMovementSessionReducer
         if (!CanCommitDiagnosticReset(command)) return false;
         _revision = command.NextRevision;
         _roomEpoch.MarkDiagnosticReset();
+        _playerLoadInitialLayerPending = false;
         _roomKnown = false;
         _room = default;
         _roomStableUpdates = 0;

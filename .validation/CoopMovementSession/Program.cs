@@ -64,36 +64,58 @@ var tests = new List<(string Name, Action Run)>
         False(session.State.TransitionPending);
         Equal(0, session.State.CompletedTransitions);
     }),
-    ("pre-room layer startup reconstruction does not mint a transition completion", () =>
+    ("player-load initial layer discards stale room evidence without transition obligations", () =>
     {
-        ManagedMovementSessionReducer session = NewSession();
-        session.RoomLayerLoaded();
-        Equal(1, session.State.RoomLayerEvents);
-        False(session.State.TransitionPending);
+        foreach (ManagedMovementReconstructionResult result in new[]
+        {
+            ManagedMovementReconstructionResult.Selected,
+            ManagedMovementReconstructionResult.NoSafeCandidate,
+        })
+        {
+            ManagedMovementSessionReducer session = Active(Room(44));
+            session.PlayerReloaded();
+            ulong reloadEpoch = session.RoomEpoch;
+            session.ObserveSafeRoom(Room(44)); // Stale pre-layer room observation.
+            session.RoomLayerLoaded();
 
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(1));
-        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+            Equal(1, session.State.RoomLayerEvents);
+            Equal(reloadEpoch, session.RoomEpoch);
+            False(session.State.RoomKnown || session.State.ProxyInitialized || session.State.TransitionPending);
+            Equal(ManagedMovementSessionPhase.WaitingForSafeUpdate, session.State.Phase);
 
-        Equal(0, session.State.CompletedTransitions);
-        False(session.State.AwaitingPostTransitionMovement);
-        Equal(0, session.State.PostTransitionAbandonments);
-        Equal(0, session.State.TransitionReconstructionFailures);
+            ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+            session.CompleteReconstruction(reconstruction.Reconstruction, result);
+
+            Equal(reloadEpoch, session.RoomEpoch);
+            Equal(0, session.State.CompletedTransitions);
+            False(session.State.AwaitingPostTransitionMovement);
+            Equal(0, session.State.PostTransitionAbandonments);
+            Equal(0, session.State.TransitionReconstructionFailures);
+        }
     }),
-    ("pre-room layer no-safe-candidate startup does not fail a transition", () =>
+    ("player-load layer latch is consumed once", () =>
     {
-        ManagedMovementSessionReducer session = NewSession();
+        ManagedMovementSessionReducer session = Active(Room(44));
+        session.PlayerReloaded();
+        session.ObserveSafeRoom(Room(44));
         session.RoomLayerLoaded();
-        Equal(1, session.State.RoomLayerEvents);
         False(session.State.TransitionPending);
 
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(1));
-        session.CompleteReconstruction(reconstruction.Reconstruction,
-            ManagedMovementReconstructionResult.NoSafeCandidate);
+        session.RoomLayerLoaded();
+        Equal(2, session.State.RoomLayerEvents);
+        True(session.State.TransitionPending);
+    }),
+    ("manual and diagnostic resets do not suppress room layers", () =>
+    {
+        ManagedMovementSessionReducer manual = Active(Room(44));
+        manual.RequestManualReset();
+        manual.RoomLayerLoaded();
+        True(manual.State.TransitionPending);
 
-        Equal(0, session.State.CompletedTransitions);
-        False(session.State.AwaitingPostTransitionMovement);
-        Equal(0, session.State.PostTransitionAbandonments);
-        Equal(0, session.State.TransitionReconstructionFailures);
+        ManagedMovementSessionReducer diagnostic = Active(Room(44));
+        diagnostic.DiagnosticReset();
+        diagnostic.RoomLayerLoaded();
+        True(diagnostic.State.TransitionPending);
     }),
     ("bounds-only churn stays one completion without abandonment", () =>
     {
