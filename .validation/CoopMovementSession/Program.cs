@@ -129,6 +129,69 @@ var tests = new List<(string Name, Action Run)>
         False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
         Equal(0, session.State.CompletedTransitions);
     }),
+    ("cold player-load reconciles stale identity to destination", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.PlayerReloaded();
+        ulong reloadEpoch = session.RoomEpoch;
+        session.RoomLayerLoaded();
+        session.ObserveSafeRoom(Room(44));
+
+        ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
+        False(destination.ReconstructionRequested);
+        False(session.State.TransitionPending);
+        Equal(reloadEpoch, session.RoomEpoch);
+
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
+        Equal(reloadEpoch, session.RoomEpoch);
+        Equal(0, session.State.CompletedTransitions);
+    }),
+    ("cold player-load accepts a direct destination", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.PlayerReloaded();
+        ulong reloadEpoch = session.RoomEpoch;
+        session.RoomLayerLoaded();
+
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
+        Equal(reloadEpoch, session.RoomEpoch);
+        Equal(0, session.State.CompletedTransitions);
+    }),
+    ("second player-load layer starts a normal real transition", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.PlayerReloaded();
+        session.RoomLayerLoaded();
+        session.ObserveSafeRoom(Room(44));
+        ulong provisionalEpoch = session.RoomEpoch;
+
+        session.RoomLayerLoaded();
+        True(session.State.TransitionPending);
+        Equal(provisionalEpoch + 1, session.RoomEpoch);
+        SettleSelected(session, Room(140));
+        Equal(1, session.State.CompletedTransitions);
+        True(session.State.AwaitingPostTransitionMovement);
+    }),
+    ("settled provisional player-load room resumes normal transitions", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.PlayerReloaded();
+        session.RoomLayerLoaded();
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        ulong provisionalEpoch = session.RoomEpoch;
+
+        session.ObserveSafeRoom(Room(220));
+        True(session.State.TransitionPending);
+        Equal(provisionalEpoch + 1, session.RoomEpoch);
+        SettleSelected(session, Room(220));
+        Equal(1, session.State.CompletedTransitions);
+        True(session.State.AwaitingPostTransitionMovement);
+    }),
     ("post-reconciliation room changes remain normal transitions", () =>
     {
         ManagedMovementSessionReducer session = Active(Room(44));
