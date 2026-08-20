@@ -444,7 +444,7 @@ public sealed class ManagedMovementSessionReducer
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         _roomLayerEvents = events;
-        BeginTransition();
+        if (_roomKnown) BeginTransition();
         InvalidateProxyForTransition();
     }
 

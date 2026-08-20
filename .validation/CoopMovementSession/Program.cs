@@ -48,6 +48,8 @@ var tests = new List<(string Name, Action Run)>
         ManagedMovementSessionReducer session = Active(Room(1));
         session.RoomLayerLoaded();
         Equal(1, session.State.RoomLayerEvents);
+        True(session.State.TransitionPending);
+        False(session.State.ProxyInitialized);
         ManagedMovementSessionTransition reconstruction = default;
         for (int update = 0; update < 30; update++)
         {
@@ -61,6 +63,37 @@ var tests = new List<(string Name, Action Run)>
         True(reconstruction.ReconstructionRequested);
         False(session.State.TransitionPending);
         Equal(0, session.State.CompletedTransitions);
+    }),
+    ("pre-room layer startup reconstruction does not mint a transition completion", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.RoomLayerLoaded();
+        Equal(1, session.State.RoomLayerEvents);
+        False(session.State.TransitionPending);
+
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(1));
+        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
+
+        Equal(0, session.State.CompletedTransitions);
+        False(session.State.AwaitingPostTransitionMovement);
+        Equal(0, session.State.PostTransitionAbandonments);
+        Equal(0, session.State.TransitionReconstructionFailures);
+    }),
+    ("pre-room layer no-safe-candidate startup does not fail a transition", () =>
+    {
+        ManagedMovementSessionReducer session = NewSession();
+        session.RoomLayerLoaded();
+        Equal(1, session.State.RoomLayerEvents);
+        False(session.State.TransitionPending);
+
+        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(1));
+        session.CompleteReconstruction(reconstruction.Reconstruction,
+            ManagedMovementReconstructionResult.NoSafeCandidate);
+
+        Equal(0, session.State.CompletedTransitions);
+        False(session.State.AwaitingPostTransitionMovement);
+        Equal(0, session.State.PostTransitionAbandonments);
+        Equal(0, session.State.TransitionReconstructionFailures);
     }),
     ("bounds-only churn stays one completion without abandonment", () =>
     {
