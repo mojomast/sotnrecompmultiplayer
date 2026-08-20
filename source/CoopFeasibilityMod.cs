@@ -914,8 +914,10 @@ public sealed class CoopFeasibility : IMod
             CancelAutomaticTest("player reloaded");
             ReleaseVirtualKeys();
             _pad2Source.Reset();
+            ManagedMovementSessionState beforeReload = _movementSession.State;
             _movementSession.PlayerReloaded();
-            _nativeLoadBootstrap.Arm();
+            if (beforeReload.RoomKnown) _nativeLoadBootstrap.Arm(beforeReload.Room);
+            else _nativeLoadBootstrap.Arm();
             TraceTransition(MovementTransitionTraceSource.PlayerLoaded, default, "armed", "none");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
@@ -1241,11 +1243,11 @@ public sealed class CoopFeasibility : IMod
             bool requested = _reinitializeRequested;
             ReconstructionRunResult reconstruction = TryReconstructProxy(context, memory,
                 requested ? "RESET" : "ROOM", movement.Reconstruction);
-            _nativeLoadBootstrap.CompleteReconstruction(reconstruction == ReconstructionRunResult.Selected
+            bool bootstrapClosed = _nativeLoadBootstrap.CompleteReconstruction(reconstruction == ReconstructionRunResult.Selected
                 ? ManagedMovementReconstructionResult.Selected
                 : reconstruction == ReconstructionRunResult.NoSafeCandidate
                     ? ManagedMovementReconstructionResult.NoSafeCandidate
-                    : ManagedMovementReconstructionResult.AdapterFault);
+                    : ManagedMovementReconstructionResult.AdapterFault, observedRoom.ManagedKey());
             if (reconstruction != ReconstructionRunResult.Selected)
                 _movementSession.CompleteReconstruction(movement.Reconstruction,
                     reconstruction == ReconstructionRunResult.NoSafeCandidate
@@ -1268,7 +1270,8 @@ public sealed class CoopFeasibility : IMod
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
-                reconstruction.ToString(), "cleared");
+                bootstrapClosed ? "Selected:bootstrap-closed-post-load-identity" : reconstruction.ToString(),
+                "cleared");
             if (requested)
             {
                 _operationStatus = "Proxy reset completed beside Player 1";

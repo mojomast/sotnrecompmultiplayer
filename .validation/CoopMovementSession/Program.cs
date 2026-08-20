@@ -84,6 +84,33 @@ var tests = new List<(string Name, Action Run)>
         bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.AdapterFault);
         Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
     }),
+    ("PlayerLoaded layer stale 44 selection rebaselines to stable 140 before close", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(44));
+        var bootstrap = new NativeLoadBootstrapState();
+
+        // PlayerLoaded arms the bootstrap; its initial layer is suppressed before stale room 44 publishes.
+        bootstrap.Arm(session.State.Room);
+        session.PlayerReloaded();
+        ulong reloadEpoch = session.RoomEpoch;
+        ManagedMovementSessionTransition stale = Trigger(session, Room(44));
+        session.CompleteReconstruction(stale.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(44)));
+        Equal(NativeLoadBootstrapPhase.ProvisionalSelected, bootstrap.Phase);
+        True(bootstrap.Armed);
+
+        // The actual room rebaselines load state rather than creating a semantic transition.
+        session.RebaselineRoom(Room(140));
+        Equal(reloadEpoch, session.RoomEpoch);
+        False(session.State.TransitionPending || session.State.ProxyInitialized);
+        Equal(0, session.State.CompletedTransitions);
+
+        ManagedMovementSessionTransition destination = Trigger(session, Room(140));
+        session.CompleteReconstruction(destination.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        True(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(140)));
+        Equal(NativeLoadBootstrapPhase.Closed, bootstrap.Phase);
+        False(bootstrap.Armed);
+    }),
     ("native load baseline does not create a reducer transition", () =>
     {
         ManagedMovementSessionReducer session = NewSession();
@@ -303,13 +330,15 @@ var tests = new List<(string Name, Action Run)>
         }
         trace.Record(MovementTransitionTrace.Capacity, MovementTransitionTrace.Capacity,
             MovementTransitionTraceSource.Reconstruction, session.State,
-            Room((byte)(MovementTransitionTrace.Capacity + 1)), "NoSafeCandidate", "retry",
-            NativeLoadBootstrapPhase.Suspended);
+            Room((byte)(MovementTransitionTrace.Capacity + 1)),
+            "Selected:bootstrap-closed-post-load-identity", "cleared",
+            NativeLoadBootstrapPhase.Closed);
 
         MovementTransitionTraceEntry[] entries = trace.Snapshot();
         Equal(MovementTransitionTrace.Capacity, entries.Length);
         Equal(MovementTransitionTraceSource.Reconstruction, entries[^1].EventSource);
-        Equal("NoSafeCandidate", entries[^1].Reconstruction);
+        Equal("Selected:bootstrap-closed-post-load-identity", entries[^1].Reconstruction);
+        Equal(NativeLoadBootstrapPhase.Closed, entries[^1].BootstrapPhase);
         False(entries[^1].TransitionPending);
         Equal((byte)(MovementTransitionTrace.Capacity + 1), entries[^1].Current.Room);
     }),
