@@ -11,6 +11,7 @@
     <Compile Include="../../source/ManagedMovementSessionState.cs" Link="ManagedMovementSessionState.cs" />
     <Compile Include="../../source/ManagedReplayState.cs" Link="ManagedReplayState.cs" />
     <Compile Include="../../source/MovementTransitionTrace.cs" Link="MovementTransitionTrace.cs" />
+    <Compile Include="../../source/NativeLoadBootstrapState.cs" Link="NativeLoadBootstrapState.cs" />
     <Compile Include="../../source/ReconstructionPolicyState.cs" Link="ReconstructionPolicyState.cs" />
     <Compile Include="../../source/ManagedHealthState.cs" Link="ManagedHealthState.cs" />
     <Compile Include="../../source/ManagedStanceState.cs" Link="ManagedStanceState.cs" />

@@ -10,6 +10,9 @@ public enum MovementTransitionTraceSource : byte
     Recovery,
     Reconstruction,
     Retry,
+    PlayerLoaded,
+    BootstrapLayer,
+    BootstrapSafe,
 }
 
 // Fixed-size lifecycle evidence for diagnosing transition ordering without retaining gameplay history.
@@ -21,14 +24,14 @@ public sealed class MovementTransitionTrace
     private int _next;
     private int _count;
 
-    public void Record(long frame, MovementTransitionTraceSource source,
+    public void Record(long frame, long hookSequence, MovementTransitionTraceSource source,
         ManagedMovementSessionState state, ManagedRoomKey current, string reconstruction,
-        string retry)
+        string retry, NativeLoadBootstrapPhase bootstrapPhase, int layerStage = -1, int layerIndex = -1)
     {
-        if (frame < 0) throw new ArgumentOutOfRangeException(nameof(frame));
-        _entries[_next] = new MovementTransitionTraceEntry(frame, source, state.TransitionOrigin,
+        if (frame < 0 || hookSequence < 0) throw new ArgumentOutOfRangeException(nameof(frame));
+        _entries[_next] = new MovementTransitionTraceEntry(frame, hookSequence, source, state.TransitionOrigin,
             current, state.TransitionPending, state.AwaitingPostTransitionMovement,
-            reconstruction, retry);
+            reconstruction, retry, bootstrapPhase, layerStage, layerIndex, state.Phase);
         _next = (_next + 1) % Capacity;
         if (_count < Capacity) _count++;
     }
@@ -45,6 +48,7 @@ public sealed class MovementTransitionTrace
 public readonly struct MovementTransitionTraceEntry
 {
     public long Frame { get; }
+    public long HookSequence { get; }
     public MovementTransitionTraceSource EventSource { get; }
     public MovementTransitionTraceRoom Origin { get; }
     public MovementTransitionTraceRoom Current { get; }
@@ -52,12 +56,28 @@ public readonly struct MovementTransitionTraceEntry
     public bool AwaitingPostTransitionMovement { get; }
     public string Reconstruction { get; }
     public string Retry { get; }
+    public NativeLoadBootstrapPhase BootstrapPhase { get; }
+    public int LayerStage { get; }
+    public int LayerIndex { get; }
+    public ManagedMovementSessionPhase ReducerPhase { get; }
 
     internal MovementTransitionTraceEntry(long frame, MovementTransitionTraceSource eventSource,
         ManagedRoomKey origin, ManagedRoomKey current, bool transitionPending,
         bool awaitingPostTransitionMovement, string reconstruction, string retry)
+        : this(frame, 0, eventSource, origin, current, transitionPending,
+            awaitingPostTransitionMovement, reconstruction, retry, NativeLoadBootstrapPhase.Closed, -1, -1,
+            ManagedMovementSessionPhase.Dormant)
+    {
+    }
+
+    internal MovementTransitionTraceEntry(long frame, long hookSequence, MovementTransitionTraceSource eventSource,
+        ManagedRoomKey origin, ManagedRoomKey current, bool transitionPending,
+        bool awaitingPostTransitionMovement, string reconstruction, string retry,
+        NativeLoadBootstrapPhase bootstrapPhase, int layerStage, int layerIndex,
+        ManagedMovementSessionPhase reducerPhase)
     {
         Frame = frame;
+        HookSequence = hookSequence;
         EventSource = eventSource;
         Origin = new MovementTransitionTraceRoom(origin);
         Current = new MovementTransitionTraceRoom(current);
@@ -65,6 +85,10 @@ public readonly struct MovementTransitionTraceEntry
         AwaitingPostTransitionMovement = awaitingPostTransitionMovement;
         Reconstruction = reconstruction;
         Retry = retry;
+        BootstrapPhase = bootstrapPhase;
+        LayerStage = layerStage;
+        LayerIndex = layerIndex;
+        ReducerPhase = reducerPhase;
     }
 }
 

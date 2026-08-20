@@ -50,6 +50,10 @@ var tests = new List<(string Name, Action Run)>
         JsonElement entry = document.RootElement.GetProperty("transitionTrace")[0];
         AssertRoom(entry.GetProperty("origin"), 17, 51, 34, -64, 128, 448, 608);
         AssertRoom(entry.GetProperty("current"), 68, 102, 85, 16, -32, 336, 208);
+        Equal(0L, entry.GetProperty("hookSequence").GetInt64());
+        Equal((int)NativeLoadBootstrapPhase.Closed, entry.GetProperty("bootstrapPhase").GetInt32());
+        Equal(-1, entry.GetProperty("layerStage").GetInt32());
+        Equal((int)ManagedMovementSessionPhase.Dormant, entry.GetProperty("reducerPhase").GetInt32());
     }),
     ("envelope generation mismatch rejected", () => RejectEnvelope(1)),
     ("duplicate key rejected", () => Reject(Golden.Replace(" H=W:0/0/0/0/0", " H=W:0/0/0/0/0 H=W:0/0/0/0/0"))),

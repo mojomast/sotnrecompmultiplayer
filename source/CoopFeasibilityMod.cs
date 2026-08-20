@@ -149,6 +149,8 @@ public sealed class CoopFeasibility : IMod
     private readonly string _diagnosticSessionId = Guid.NewGuid().ToString("N");
     private long _diagnosticFrame;
     private readonly MovementTransitionTrace _transitionTrace = new();
+    private readonly NativeLoadBootstrapState _nativeLoadBootstrap = new();
+    private long _transitionHookSequence;
     private int _proxyResetRequests => _movementSession.State.ManualResetRequests;
     private int _proxyResetCompletions => _movementSession.State.ManualResetCompletions;
 
@@ -913,6 +915,8 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             _pad2Source.Reset();
             _movementSession.PlayerReloaded();
+            _nativeLoadBootstrap.Arm();
+            TraceTransition(MovementTransitionTraceSource.PlayerLoaded, default, "armed", "none");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
@@ -945,10 +949,30 @@ public sealed class CoopFeasibility : IMod
         {
             CancelAutomaticTest("room layer changed");
             ReleaseVirtualKeys();
+            if (_nativeLoadBootstrap.Armed)
+            {
+                _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                    TetherLifecycle.Inactive, TetherReason.Reconstruction));
+                _locomotionState.Invalidate();
+                DisarmAwareness("LOAD");
+                ClearJumpForgiveness();
+                ResetNativeSpriteFrame();
+                _contactVisualConfirmed = false;
+                SuspendContactScan("LOAD");
+                CancelOwnedAttack("LOAD");
+                ClearLatchedAttackProfile();
+                _dropTracker.Cancel();
+                _dropWindowOpen = false;
+                _visualConfirmed = false;
+                _safeReason = $"Native load bootstrap: stage 0x{e.StageId:X2}, layer {e.LayerIndex}";
+                TraceTransition(MovementTransitionTraceSource.BootstrapLayer, _movementSession.State.Room,
+                    "suppressed", _reconstructionRetry.Active ? "retry" : "none", e.StageId, e.LayerIndex);
+                return;
+            }
             BeginTransition();
             _movementSession.RoomLayerLoaded();
             TraceTransition(MovementTransitionTraceSource.RoomLayer, _movementSession.State.Room,
-                "none", "cleared");
+                "none", "cleared", e.StageId, e.LayerIndex);
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
@@ -1159,6 +1183,20 @@ public sealed class CoopFeasibility : IMod
         }
 
         RoomIdentity observedRoom = ReadRoomIdentity(memory);
+        bool bootstrapBaseline = _nativeLoadBootstrap.ConsumeSafeBaseline();
+        bool bootstrapRebaseline = _nativeLoadBootstrap.Armed && !bootstrapBaseline &&
+            _roomKnown && !_room.Equals(observedRoom);
+        if (bootstrapRebaseline)
+        {
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
+            _movementSession.RebaselineRoom(observedRoom.ManagedKey());
+            _room = observedRoom;
+            _locomotionState.Invalidate();
+            TraceTransition(MovementTransitionTraceSource.BootstrapSafe, observedRoom.ManagedKey(),
+                "rebaseline", "cleared");
+            return;
+        }
         bool roomChanged = _roomKnown && !_room.Equals(observedRoom);
         if (roomChanged)
         {
@@ -1185,10 +1223,10 @@ public sealed class CoopFeasibility : IMod
         _room = observedRoom;
         ManagedMovementSessionState beforeMovement = _movementSession.State;
         ManagedMovementSessionTransition movement = _movementSession.ObserveSafeRoom(observedRoom.ManagedKey());
-        if (!beforeMovement.RoomKnown || !beforeMovement.Room.Equals(observedRoom.ManagedKey()) ||
+        if (bootstrapBaseline || !beforeMovement.RoomKnown || !beforeMovement.Room.Equals(observedRoom.ManagedKey()) ||
             movement.ReconstructionRequested ||
             beforeMovement.CompletedTransitions != movement.State.CompletedTransitions)
-            TraceTransition(MovementTransitionTraceSource.SafeRoom, observedRoom.ManagedKey(),
+            TraceTransition(bootstrapBaseline ? MovementTransitionTraceSource.BootstrapSafe : MovementTransitionTraceSource.SafeRoom, observedRoom.ManagedKey(),
                 movement.ReconstructionRequested ? "requested" : "none", retryProbe ? "retry" : "none");
         if (roomChanged)
         {
@@ -1203,6 +1241,11 @@ public sealed class CoopFeasibility : IMod
             bool requested = _reinitializeRequested;
             ReconstructionRunResult reconstruction = TryReconstructProxy(context, memory,
                 requested ? "RESET" : "ROOM", movement.Reconstruction);
+            _nativeLoadBootstrap.CompleteReconstruction(reconstruction == ReconstructionRunResult.Selected
+                ? ManagedMovementReconstructionResult.Selected
+                : reconstruction == ReconstructionRunResult.NoSafeCandidate
+                    ? ManagedMovementReconstructionResult.NoSafeCandidate
+                    : ManagedMovementReconstructionResult.AdapterFault);
             if (reconstruction != ReconstructionRunResult.Selected)
                 _movementSession.CompleteReconstruction(movement.Reconstruction,
                     reconstruction == ReconstructionRunResult.NoSafeCandidate
@@ -2874,8 +2917,10 @@ public sealed class CoopFeasibility : IMod
     }
 
     private void TraceTransition(MovementTransitionTraceSource source, ManagedRoomKey current,
-        string reconstruction, string retry) => _transitionTrace.Record(_diagnosticFrame, source,
-        _movementSession.State, current, reconstruction, retry);
+        string reconstruction, string retry, int layerStage = -1, int layerIndex = -1) =>
+        _transitionTrace.Record(_diagnosticFrame, checked(++_transitionHookSequence), source,
+            _movementSession.State, current, reconstruction, retry, _nativeLoadBootstrap.Phase,
+            layerStage, layerIndex);
 
     private static int AnimationFrameCount(ManagedAnimation animation) =>
         ManagedLocomotionCatalog.FrameCount(animation);

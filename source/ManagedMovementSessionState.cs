@@ -31,16 +31,6 @@ public enum ManagedMovementRecoveryKind : byte
     Collision,
 }
 
-// Bounded to the first layer after PlayerLoaded so a real later layer always transitions normally.
-internal enum PlayerLoadReconciliationPhase : byte
-{
-    Closed,
-    AwaitingInitialLayer,
-    AwaitingProvisionalRoom,
-    ProvisionalRoom,
-    ReconciledRoom,
-}
-
 public readonly struct ManagedMovementReconstructionContinuation
 {
     public readonly ulong Revision;
@@ -200,7 +190,6 @@ public sealed class ManagedMovementSessionReducer
     private ulong _revision = 1;
     private ManagedMovementSessionPhase _phase = ManagedMovementSessionPhase.Dormant;
     private bool _roomKnown;
-    private PlayerLoadReconciliationPhase _playerLoadReconciliation;
     private ManagedRoomKey _room;
     private ManagedRoomKey _transitionOrigin;
     private int _safeUpdates;
@@ -259,8 +248,6 @@ public sealed class ManagedMovementSessionReducer
         if (_pendingReconstructionRevision != 0)
             throw new InvalidOperationException("A reconstruction result is still pending.");
         bool roomChanges = _roomKnown && !_room.SameRoomAs(room);
-        bool playerLoadDestinationReconciliation =
-            _playerLoadReconciliation == PlayerLoadReconciliationPhase.ProvisionalRoom && roomChanges;
         int projectedSafe = roomChanges ? 1 : IncrementSaturating(_safeUpdates);
         bool willRequest = (!_proxyInitialized || _manualResetPending) &&
             projectedSafe >= StabilizationUpdates;
@@ -270,7 +257,7 @@ public sealed class ManagedMovementSessionReducer
         if (_transitionPending) _ = IncrementChecked(_transitionPendingUpdates);
         if (roomChanges && _awaitingPostTransitionMovement)
             _ = IncrementChecked(_postTransitionAbandonments);
-        if (roomChanges && !playerLoadDestinationReconciliation && !_transitionPending &&
+        if (roomChanges && !_transitionPending &&
             _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
@@ -394,9 +381,6 @@ public sealed class ManagedMovementSessionReducer
                     _postTransitionMoved = false;
                 }
             }
-            if (_playerLoadReconciliation is PlayerLoadReconciliationPhase.ProvisionalRoom or
-                PlayerLoadReconciliationPhase.ReconciledRoom)
-                _playerLoadReconciliation = PlayerLoadReconciliationPhase.Closed;
             _phase = _transitionPending ? ManagedMovementSessionPhase.TransitionPending :
                 ManagedMovementSessionPhase.Active;
             return;
@@ -457,32 +441,11 @@ public sealed class ManagedMovementSessionReducer
         RequireOperational();
         int events = IncrementChecked(_roomLayerEvents);
         if (_awaitingPostTransitionMovement) _ = IncrementChecked(_postTransitionAbandonments);
-        if (_playerLoadReconciliation != PlayerLoadReconciliationPhase.AwaitingInitialLayer &&
-            !_transitionPending && _roomEpoch.Known &&
+        if (!_transitionPending && _roomEpoch.Known &&
             _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         _roomLayerEvents = events;
-        if (_playerLoadReconciliation == PlayerLoadReconciliationPhase.AwaitingInitialLayer)
-        {
-            _playerLoadReconciliation = PlayerLoadReconciliationPhase.AwaitingProvisionalRoom;
-            _roomKnown = false;
-            _room = default;
-            _transitionOrigin = default;
-            _transitionPending = false;
-            _transitionPendingUpdates = 0;
-            _awaitingPostTransitionMovement = false;
-            _postTransitionMoved = false;
-            _postTransitionCommandedRaw = 0;
-            _proxyInitialized = false;
-            _safeUpdates = 0;
-            _roomStableUpdates = 0;
-            _pendingReconstructionRevision = 0;
-            _phase = ManagedMovementSessionPhase.WaitingForSafeUpdate;
-            return;
-        }
-        if (_playerLoadReconciliation != PlayerLoadReconciliationPhase.Closed)
-            _playerLoadReconciliation = PlayerLoadReconciliationPhase.Closed;
         BeginTransition();
         InvalidateProxyForTransition();
     }
@@ -494,7 +457,6 @@ public sealed class ManagedMovementSessionReducer
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         _roomEpoch.InvalidateForPlayerReload();
-        _playerLoadReconciliation = PlayerLoadReconciliationPhase.AwaitingInitialLayer;
         _roomKnown = false;
         _room = default;
         _transitionPending = false;
@@ -503,6 +465,29 @@ public sealed class ManagedMovementSessionReducer
         _postTransitionMoved = false;
         InvalidateProxyForTransition();
         _phase = ManagedMovementSessionPhase.WaitingForSafeUpdate;
+    }
+
+    // The adapter has already classified this as pre-reconstruction native-load evidence.
+    // Replace it without creating a room epoch or semantic transition.
+    public void RebaselineRoom(ManagedRoomKey room)
+    {
+        RequireOperational();
+        if (_pendingReconstructionRevision != 0)
+            throw new InvalidOperationException("A reconstruction result is still pending.");
+        AdvanceRevision();
+        _roomKnown = true;
+        _room = room;
+        _transitionOrigin = default;
+        _safeUpdates = 1;
+        _roomStableUpdates = 1;
+        _transitionPending = false;
+        _transitionPendingUpdates = 0;
+        _proxyInitialized = false;
+        _reconstructionHardFailure = false;
+        _awaitingPostTransitionMovement = false;
+        _postTransitionMoved = false;
+        _postTransitionCommandedRaw = 0;
+        _phase = ManagedMovementSessionPhase.Stabilizing;
     }
 
     public void DiagnosticReset()
@@ -525,7 +510,6 @@ public sealed class ManagedMovementSessionReducer
         if (!CanCommitDiagnosticReset(command)) return false;
         _revision = command.NextRevision;
         _roomEpoch.MarkDiagnosticReset();
-        _playerLoadReconciliation = PlayerLoadReconciliationPhase.Closed;
         _roomKnown = false;
         _room = default;
         _roomStableUpdates = 0;
@@ -586,25 +570,10 @@ public sealed class ManagedMovementSessionReducer
             _roomEpoch.ReconcileAfterDiagnosticReset(room);
             _roomKnown = true;
             _roomStableUpdates = 1;
-            if (_playerLoadReconciliation == PlayerLoadReconciliationPhase.AwaitingProvisionalRoom)
-                _playerLoadReconciliation = PlayerLoadReconciliationPhase.ProvisionalRoom;
             return;
         }
         if (!_room.SameRoomAs(room))
         {
-            if (_playerLoadReconciliation == PlayerLoadReconciliationPhase.ProvisionalRoom)
-            {
-                _room = room;
-                _roomEpoch.ReconcileAfterDiagnosticReset(room);
-                _roomStableUpdates = 1;
-                _safeUpdates = 0;
-                _proxyInitialized = false;
-                _pendingReconstructionRevision = 0;
-                _playerLoadReconciliation = PlayerLoadReconciliationPhase.ReconciledRoom;
-                return;
-            }
-            if (_playerLoadReconciliation == PlayerLoadReconciliationPhase.ReconciledRoom)
-                _playerLoadReconciliation = PlayerLoadReconciliationPhase.Closed;
             BeginTransition();
             _room = room;
             _roomEpoch.Observe(room);

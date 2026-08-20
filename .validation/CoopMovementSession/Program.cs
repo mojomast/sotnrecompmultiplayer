@@ -64,162 +64,62 @@ var tests = new List<(string Name, Action Run)>
         False(session.State.TransitionPending);
         Equal(0, session.State.CompletedTransitions);
     }),
-    ("player-load reconciliation accepts stale evidence in both layer orderings", () =>
+    ("native load bootstrap consumes only its first safe baseline", () =>
     {
-        foreach (bool staleBeforeLayer in new[] { true, false })
-        {
-            foreach (ManagedMovementReconstructionResult result in new[]
-            {
-                ManagedMovementReconstructionResult.Selected,
-                ManagedMovementReconstructionResult.NoSafeCandidate,
-            })
-            {
-                ManagedMovementSessionReducer session = Active(Room(44));
-                session.PlayerReloaded();
-                ulong reloadEpoch = session.RoomEpoch;
-                if (staleBeforeLayer)
-                {
-                    session.ObserveSafeRoom(Room(44)); // Stale pre-layer room observation.
-                    session.RoomLayerLoaded();
-                }
-                else
-                {
-                    session.RoomLayerLoaded();
-                    session.ObserveSafeRoom(Room(44)); // Stale post-layer room observation.
-                }
-
-                Equal(1, session.State.RoomLayerEvents);
-                Equal(reloadEpoch, session.RoomEpoch);
-                False(session.State.ProxyInitialized || session.State.TransitionPending);
-
-                ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
-                False(destination.ReconstructionRequested);
-                False(session.State.TransitionPending);
-                ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-                session.CompleteReconstruction(reconstruction.Reconstruction, result);
-
-                Equal(reloadEpoch, session.RoomEpoch);
-                Equal(0, session.State.CompletedTransitions);
-                False(session.State.AwaitingPostTransitionMovement);
-                Equal(0, session.State.PostTransitionAbandonments);
-                Equal(0, session.State.TransitionReconstructionFailures);
-            }
-        }
+        var bootstrap = new NativeLoadBootstrapState();
+        bootstrap.Arm();
+        True(bootstrap.Armed);
+        True(bootstrap.ConsumeSafeBaseline());
+        False(bootstrap.ConsumeSafeBaseline());
+        Equal(NativeLoadBootstrapPhase.BaselineObserved, bootstrap.Phase);
     }),
-    ("player-load reconciliation accepts stale room bounds refresh", () =>
+    ("native load bootstrap remains armed across failed reconstruction", () =>
     {
-        ManagedMovementSessionReducer session = Active(Room(44));
-        var staleRoom44 = new ManagedRoomKey(1, 44, 0, 16, 0, 272, 240);
-        session.PlayerReloaded();
-        ulong reloadEpoch = session.RoomEpoch;
-        session.RoomLayerLoaded();
-        session.ObserveSafeRoom(staleRoom44);
-
-        True(session.State.Room.Equals(staleRoom44));
-        ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
-        False(destination.ReconstructionRequested);
-        Equal(reloadEpoch, session.RoomEpoch);
-        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
-        Equal(0, session.State.CompletedTransitions);
-        Equal(0, session.State.TransitionPendingUpdates);
-
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
-        Equal(reloadEpoch, session.RoomEpoch);
-        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
-        Equal(0, session.State.CompletedTransitions);
+        var bootstrap = new NativeLoadBootstrapState();
+        bootstrap.Arm();
+        bootstrap.ConsumeSafeBaseline();
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.NoSafeCandidate);
+        Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
+        True(bootstrap.Armed);
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.AdapterFault);
+        Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
     }),
-    ("cold player-load reconciles stale identity to destination", () =>
+    ("native load baseline does not create a reducer transition", () =>
     {
         ManagedMovementSessionReducer session = NewSession();
         session.PlayerReloaded();
         ulong reloadEpoch = session.RoomEpoch;
-        session.RoomLayerLoaded();
-        session.ObserveSafeRoom(Room(44));
-
-        ManagedMovementSessionTransition destination = session.ObserveSafeRoom(Room(140));
-        False(destination.ReconstructionRequested);
+        session.ObserveSafeRoom(Room(140));
         False(session.State.TransitionPending);
         Equal(reloadEpoch, session.RoomEpoch);
-
         ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
         session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
         False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
-        Equal(reloadEpoch, session.RoomEpoch);
         Equal(0, session.State.CompletedTransitions);
     }),
-    ("cold player-load accepts a direct destination", () =>
+    ("native load rebaseline replaces stale identity without a transition", () =>
     {
         ManagedMovementSessionReducer session = NewSession();
         session.PlayerReloaded();
         ulong reloadEpoch = session.RoomEpoch;
-        session.RoomLayerLoaded();
+        session.ObserveSafeRoom(Room(44));
+        session.RebaselineRoom(Room(140));
 
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
-        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
         Equal(reloadEpoch, session.RoomEpoch);
+        False(session.State.TransitionPending || session.State.ProxyInitialized);
         Equal(0, session.State.CompletedTransitions);
+        Equal(Room(140), session.State.Room);
     }),
-    ("second player-load layer starts a normal real transition", () =>
+    ("closed native load bootstrap resumes ordinary layer transitions", () =>
     {
-        ManagedMovementSessionReducer session = NewSession();
-        session.PlayerReloaded();
-        session.RoomLayerLoaded();
-        session.ObserveSafeRoom(Room(44));
-        ulong provisionalEpoch = session.RoomEpoch;
+        var bootstrap = new NativeLoadBootstrapState();
+        bootstrap.Arm();
+        bootstrap.ConsumeSafeBaseline();
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected);
+        False(bootstrap.Armed);
 
+        ManagedMovementSessionReducer session = Active(Room(140));
         session.RoomLayerLoaded();
-        True(session.State.TransitionPending);
-        Equal(provisionalEpoch + 1, session.RoomEpoch);
-        SettleSelected(session, Room(140));
-        Equal(1, session.State.CompletedTransitions);
-        True(session.State.AwaitingPostTransitionMovement);
-    }),
-    ("settled provisional player-load room resumes normal transitions", () =>
-    {
-        ManagedMovementSessionReducer session = NewSession();
-        session.PlayerReloaded();
-        session.RoomLayerLoaded();
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
-        ulong provisionalEpoch = session.RoomEpoch;
-
-        session.ObserveSafeRoom(Room(220));
-        True(session.State.TransitionPending);
-        Equal(provisionalEpoch + 1, session.RoomEpoch);
-        SettleSelected(session, Room(220));
-        Equal(1, session.State.CompletedTransitions);
-        True(session.State.AwaitingPostTransitionMovement);
-    }),
-    ("post-reconciliation room changes remain normal transitions", () =>
-    {
-        ManagedMovementSessionReducer session = Active(Room(44));
-        session.PlayerReloaded();
-        session.RoomLayerLoaded();
-        session.ObserveSafeRoom(Room(44));
-        ManagedMovementSessionTransition reconstruction = Trigger(session, Room(140));
-        session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
-        ulong destinationEpoch = session.RoomEpoch;
-
-        ManagedMovementSessionTransition changed = session.ObserveSafeRoom(Room(220));
-        False(changed.ReconstructionRequested);
-        True(session.State.TransitionPending);
-        Equal(destinationEpoch + 1, session.RoomEpoch);
-        SettleSelected(session, Room(220));
-        Equal(1, session.State.CompletedTransitions);
-        True(session.State.AwaitingPostTransitionMovement);
-    }),
-    ("player-load layer latch is consumed once", () =>
-    {
-        ManagedMovementSessionReducer session = Active(Room(44));
-        session.PlayerReloaded();
-        session.ObserveSafeRoom(Room(44));
-        session.RoomLayerLoaded();
-        False(session.State.TransitionPending);
-
-        session.RoomLayerLoaded();
-        Equal(2, session.State.RoomLayerEvents);
         True(session.State.TransitionPending);
     }),
     ("manual and diagnostic resets do not suppress room layers", () =>
@@ -398,11 +298,13 @@ var tests = new List<(string Name, Action Run)>
         var trace = new MovementTransitionTrace();
         for (int index = 0; index < MovementTransitionTrace.Capacity; index++)
         {
-            trace.Record(index, MovementTransitionTraceSource.SafeRoom, session.State, Room((byte)(2 + index)),
-                "none", "none");
+            trace.Record(index, index, MovementTransitionTraceSource.SafeRoom, session.State,
+                Room((byte)(2 + index)), "none", "none", NativeLoadBootstrapPhase.Closed);
         }
-        trace.Record(MovementTransitionTrace.Capacity, MovementTransitionTraceSource.Reconstruction,
-            session.State, Room((byte)(MovementTransitionTrace.Capacity + 1)), "NoSafeCandidate", "retry");
+        trace.Record(MovementTransitionTrace.Capacity, MovementTransitionTrace.Capacity,
+            MovementTransitionTraceSource.Reconstruction, session.State,
+            Room((byte)(MovementTransitionTrace.Capacity + 1)), "NoSafeCandidate", "retry",
+            NativeLoadBootstrapPhase.Suspended);
 
         MovementTransitionTraceEntry[] entries = trace.Snapshot();
         Equal(MovementTransitionTrace.Capacity, entries.Length);

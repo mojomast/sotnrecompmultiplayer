@@ -294,7 +294,10 @@ internal static partial class Program
         ValidateOrdering(source, "private void OnPlayerLoaded(", "private void OnRoomLayerLoaded(",
             ["_movementSession.PlayerReloaded();", "_locomotionState.Invalidate();", "ResetManagedHealth();"]);
         ValidateOrdering(source, "private void OnRoomLayerLoaded(", "[PostHook(\"dra\", \"RunMainEngine\")]",
-            ["BeginTransition();", "_movementSession.RoomLayerLoaded();", "_locomotionState.Invalidate();"]);
+            ["BeginTransition();", "_movementSession.RoomLayerLoaded();"]);
+        if (!source.Contains("if (_nativeLoadBootstrap.Armed)", StringComparison.Ordinal) ||
+            !source.Contains("MovementTransitionTraceSource.BootstrapLayer", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native load bootstrap must suppress layer accounting in the adapter.");
         ValidateOrdering(source, "private void Fail(", "private string BuildReport()",
             ["_movementSession.Fatal();", "_locomotionState.Invalidate();", "CancelOwnedAttack(\"FATAL\");"]);
         ValidateOrdering(source, "public void OnUnload()", "public string CaptureAutomationDiagnostics(",
