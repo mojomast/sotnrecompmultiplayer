@@ -14,24 +14,23 @@ Properties(rootElement, "schema", "id", "version", "stage", "area", "displayName
     "qualification", "orderedRooms", "rooms", "segments", "excludedBranches", "globalLimitations");
 Equal("coop-route/1", Text(rootElement, "schema"));
 Equal("no0-marble-gallery-candidate", Text(rootElement, "id"));
-Equal(1, Integer(rootElement, "version"));
+Equal(2, Integer(rootElement, "version"));
 Equal("NO0", Text(rootElement, "stage"));
-Equal(0, Integer(rootElement, "area"));
+Equal(40, Integer(rootElement, "area"));
 Equal("candidate-untested", Text(rootElement, "verdict"));
 Printable(Text(rootElement, "qualification"));
 
-int[] expected = [9, 10, 5, 6, 5, 10, 9, 19, 11, 19, 9];
+int[] expected = [140, 220, 140];
 int[] ordered = rootElement.GetProperty("orderedRooms").EnumerateArray().Select(ValueInteger).ToArray();
 Require(ordered.SequenceEqual(expected), "exact ordered route");
 string fingerprintSource = $"{Text(rootElement, "schema")}|{Integer(rootElement, "version")}|{string.Join(',', ordered)}";
 string fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(fingerprintSource))).ToLowerInvariant();
-Equal("34d38244074a0ea351c1374479cafa003bd1a21332e53554fbfba84e30591bac", fingerprint);
+Equal("b1f6e989ccc0cc1484851761c2d8143d1891fafc494a04e1d6be024046f82896", fingerprint);
 
-int[] expectedUnique = [5, 6, 9, 10, 11, 19];
+int[] expectedUnique = [140, 220];
 var expectedBounds = new Dictionary<int, (int XMin, int XMax, int YMin, int YMax)>
 {
-    [5] = (26, 28, 26, 26), [6] = (22, 25, 26, 26), [9] = (32, 32, 26, 26),
-    [10] = (29, 31, 26, 26), [11] = (36, 36, 26, 26), [19] = (33, 35, 26, 26),
+    [140] = (32, 32, 27, 27), [220] = (31, 31, 27, 27),
 };
 var roomIds = new HashSet<int>();
 foreach (JsonElement room in rootElement.GetProperty("rooms").EnumerateArray())
@@ -44,7 +43,7 @@ foreach (JsonElement room in rootElement.GetProperty("rooms").EnumerateArray())
     (int xMin, int xMax, int yMin, int yMax) = expectedBounds[id];
     Equal(xMin, Integer(bounds, "xMin")); Equal(xMax, Integer(bounds, "xMax"));
     Equal(yMin, Integer(bounds, "yMin")); Equal(yMax, Integer(bounds, "yMax"));
-    Equal("confirmed-map-cells-not-walkable-world-geometry", Text(bounds, "basis"));
+    Equal("live-observed-map-cells-not-walkable-world-geometry", Text(bounds, "basis"));
     Printable(Text(room, "purpose"));
     Printable(Text(room, "limitations"));
 }
@@ -66,8 +65,10 @@ foreach (JsonElement segment in segments)
 Equal(expected.Length - 1, segmentIndex);
 
 string[] exclusions = rootElement.GetProperty("excludedBranches").EnumerateArray().Select(ValueText).ToArray();
-string[] requiredExclusions = ["west exit beyond room 6", "south room 21", "CEN elevator",
-    "Maria branch", "bosses", "water", "shaped or moving terrain", "projectile-through-wall claims"];
+string[] requiredExclusions = ["upper clock cell room table index 9", "red door upper west ledge to corridor room 52",
+    "east lower room 148 passage", "west corridor rooms 52, 12, and 20 pending stair and hazard qualification",
+    "south statue passage", "CEN elevator", "Maria branch", "bosses", "water", "shaped or moving terrain",
+    "projectile-through-wall claims"];
 Require(exclusions.SequenceEqual(requiredExclusions), "exact exclusions");
 JsonElement limitationsElement = rootElement.GetProperty("globalLimitations");
 Require(limitationsElement.ValueKind == JsonValueKind.Array &&

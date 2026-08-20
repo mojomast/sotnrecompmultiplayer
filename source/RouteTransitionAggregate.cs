@@ -5,11 +5,13 @@ public readonly record struct RouteTransitionAggregateState(int ValidObservation
 
 // Game-free release checkpoint consumer. It accepts exactly 25 consecutive observations in the
 // declared candidate route order and stops permanently on the first failed or mismatched segment.
+// Route v2 uses live-observed telemetry room bytes: 140 is the NO0 clock-room junction (room table
+// index 21, map cell 32,27) and 220 is the plain-door save room (index 31, map cell 31,27).
 public sealed class RouteTransitionAggregateReducer
 {
     public const int RequiredObservations = 25;
-    private static readonly byte[] From = [9, 10, 5, 6, 5, 10, 9, 19, 11, 19];
-    private static readonly byte[] To = [10, 5, 6, 5, 10, 9, 19, 11, 19, 9];
+    private static readonly byte[] From = [140, 220];
+    private static readonly byte[] To = [220, 140];
     private int _valid;
     private bool _stopped;
 

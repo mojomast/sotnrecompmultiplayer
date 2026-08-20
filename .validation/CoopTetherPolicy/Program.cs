@@ -188,20 +188,20 @@ var tests = new List<(string, Action)>
     }),
     ("route aggregate requires exact consecutive 25", () =>
     {
-        int[] route = [9, 10, 5, 6, 5, 10, 9, 19, 11, 19, 9];
+        int[] route = [140, 220, 140];
         var aggregate = new RouteTransitionAggregateReducer();
         for (int i = 0; i < 25; i++)
         {
-            int index = i % 10;
+            int index = i % 2;
             bool complete = aggregate.Observe(route[index], route[index + 1], true);
             Equal(i == 24, complete);
         }
         True(aggregate.State.Complete);
         Equal(25, aggregate.State.ValidObservations);
         var mismatch = new RouteTransitionAggregateReducer();
-        False(mismatch.Observe(9, 19, true));
+        False(mismatch.Observe(140, 52, true));
         True(mismatch.State.Stopped);
-        False(mismatch.Observe(9, 10, true));
+        False(mismatch.Observe(140, 220, true));
         Equal(0, mismatch.State.ValidObservations);
     }),
 };
