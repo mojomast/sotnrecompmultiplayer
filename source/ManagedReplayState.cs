@@ -28,6 +28,9 @@ public readonly struct ManagedRoomKey : IEquatable<ManagedRoomKey>
         Stage == other.Stage && Room == other.Room && Area == other.Area && Left == other.Left &&
         Top == other.Top && Right == other.Right && Bottom == other.Bottom;
 
+    public bool SameRoomAs(ManagedRoomKey other) =>
+        Stage == other.Stage && Room == other.Room && Area == other.Area;
+
     public override bool Equals(object? obj) => obj is ManagedRoomKey other && Equals(other);
     public override int GetHashCode() => HashCode.Combine(Stage, Room, Area, Left, Top, Right, Bottom);
 }

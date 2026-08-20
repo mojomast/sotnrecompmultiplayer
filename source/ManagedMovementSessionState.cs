@@ -245,7 +245,7 @@ public sealed class ManagedMovementSessionReducer
         RequireOperational();
         if (_pendingReconstructionRevision != 0)
             throw new InvalidOperationException("A reconstruction result is still pending.");
-        bool roomChanges = _roomKnown && !_room.Equals(room);
+        bool roomChanges = _roomKnown && !_room.SameRoomAs(room);
         int projectedSafe = roomChanges ? 1 : IncrementSaturating(_safeUpdates);
         bool willRequest = (!_proxyInitialized || _manualResetPending) &&
             projectedSafe >= StabilizationUpdates;
@@ -317,7 +317,7 @@ public sealed class ManagedMovementSessionReducer
         int transitionReconstructionFailures = _transitionReconstructionFailures;
         bool completeTransition = result == ManagedMovementReconstructionResult.Selected &&
             _transitionPending && _roomStableUpdates >= TransitionStableUpdates;
-        bool changedTransition = completeTransition && !_transitionOrigin.Equals(_room);
+        bool changedTransition = completeTransition && !_transitionOrigin.SameRoomAs(_room);
         if (result == ManagedMovementReconstructionResult.Selected)
         {
             successes = IncrementChecked(successes);
@@ -545,7 +545,7 @@ public sealed class ManagedMovementSessionReducer
             _roomStableUpdates = 1;
             return;
         }
-        if (!_room.Equals(room))
+        if (!_room.SameRoomAs(room))
         {
             BeginTransition();
             _room = room;
@@ -556,6 +556,7 @@ public sealed class ManagedMovementSessionReducer
             _pendingReconstructionRevision = 0;
             return;
         }
+        _room = room;
         _roomStableUpdates = IncrementSaturating(_roomStableUpdates);
     }
 
@@ -592,7 +593,7 @@ public sealed class ManagedMovementSessionReducer
         _transitionPending = false;
         _transitionPendingUpdates = 0;
         _roomEpoch.Complete(_room);
-        if (_transitionOrigin.Equals(_room)) return;
+        if (_transitionOrigin.SameRoomAs(_room)) return;
         _completedTransitions = IncrementChecked(_completedTransitions);
         _postTransitionCommandedRaw = 0;
         _awaitingPostTransitionMovement = true;
@@ -604,7 +605,7 @@ public sealed class ManagedMovementSessionReducer
     {
         if (!_transitionPending || !proxyInitialized) return false;
         int stable = roomChanges ? 1 : IncrementSaturating(_roomStableUpdates);
-        return stable >= TransitionStableUpdates && !_transitionOrigin.Equals(observedRoom);
+        return stable >= TransitionStableUpdates && !_transitionOrigin.SameRoomAs(observedRoom);
     }
 
     private void InvalidateProxyForTransition()

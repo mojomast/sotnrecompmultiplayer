@@ -62,6 +62,53 @@ var tests = new List<(string Name, Action Run)>
         False(session.State.TransitionPending);
         Equal(0, session.State.CompletedTransitions);
     }),
+    ("bounds-only churn stays one completion without abandonment", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(1));
+        var settledA = new ManagedRoomKey(1, 2, 0, 0, 0, 256, 240);
+        var settledB = new ManagedRoomKey(1, 2, 0, 16, 0, 272, 240);
+        for (int update = 0; update < 40; update++)
+        {
+            ManagedMovementSessionTransition next = session.ObserveSafeRoom(settledA);
+            if (next.ReconstructionRequested)
+                session.CompleteReconstruction(next.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        }
+        False(session.State.TransitionPending);
+        Equal(1, session.State.CompletedTransitions);
+        True(session.State.AwaitingPostTransitionMovement);
+        ulong settledEpoch = session.RoomEpoch;
+        for (int update = 0; update < 40; update++)
+        {
+            ManagedMovementSessionTransition churn = session.ObserveSafeRoom(settledB);
+            False(churn.ReconstructionRequested);
+        }
+        Equal(1, session.State.CompletedTransitions);
+        Equal(0, session.State.PostTransitionAbandonments);
+        True(session.State.AwaitingPostTransitionMovement);
+        True(session.State.ProxyInitialized);
+        Equal(settledEpoch, session.RoomEpoch);
+        True(session.State.Room.Equals(settledB));
+        True(session.ObservePostTransitionMovement(ManagedMovementSessionReducer.PostTransitionAcceptanceRaw));
+        Equal(1, session.State.PassedTransitions);
+        Equal(0, session.State.PostTransitionAbandonments);
+    }),
+    ("bounds churn before completion cannot double count one crossing", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(1));
+        var scrolledA = new ManagedRoomKey(1, 2, 0, 0, 0, 256, 240);
+        var scrolledB = new ManagedRoomKey(1, 2, 0, 32, 0, 288, 240);
+        for (int update = 0; update < 60; update++)
+        {
+            ManagedMovementSessionTransition next = session.ObserveSafeRoom(
+                (update & 1) == 0 ? scrolledA : scrolledB);
+            if (next.ReconstructionRequested)
+                session.CompleteReconstruction(next.Reconstruction, ManagedMovementReconstructionResult.Selected);
+        }
+        False(session.State.TransitionPending);
+        Equal(1, session.State.CompletedTransitions);
+        Equal(0, session.State.PostTransitionAbandonments);
+        True(session.State.AwaitingPostTransitionMovement);
+    }),
     ("manual reset is eligible on next safe update", () =>
     {
         ManagedMovementSessionReducer session = Active(Room(1));
