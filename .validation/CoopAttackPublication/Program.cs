@@ -30,6 +30,8 @@ var tests = new List<(string Name, Action Run)>
     ("shared prepared reset commits exact and free cleanup", SharedResetSuccess),
     ("shared prepared reset carries observed reuse", SharedResetReuse),
     ("prepared publication reset rejects phase ABA", SharedResetPublicationAba),
+    ("marker projection is exact in publication and cleanup update", MarkerProjectionSameUpdate),
+    ("marker projection preserves fail-closed orphan detection", MarkerProjectionOrphan),
     ("M4 target tie is incoming damage arbitration already covered", IncomingTieScope)
 };
 
@@ -41,6 +43,23 @@ foreach ((string name, Action run) in tests)
 }
 Console.WriteLine($"CoopAttackPublication: {tests.Count - failures} passed, {failures} failed.");
 return failures == 0 ? 0 : 1;
+
+static void MarkerProjectionSameUpdate()
+{
+    Span<AttackMarkerObservation> slots = stackalloc AttackMarkerObservation[2];
+    slots[0] = new(17, true, 4, 9);
+    Equal(new AttackMarkerProjection(1, 0), AttackMarkerCensus.Project(slots, 17, 4, 9, -1, 0, 0));
+    slots[0] = default; // The successful cleanup write and projection occur in one adapter update.
+    Equal(new AttackMarkerProjection(0, 0), AttackMarkerCensus.Project(slots, -1, 0, 0, -1, 0, 0));
+}
+
+static void MarkerProjectionOrphan()
+{
+    Span<AttackMarkerObservation> slots = stackalloc AttackMarkerObservation[2];
+    slots[0] = new(17, true, 4, 9);
+    slots[1] = new(18, true, 5, 9);
+    Equal(new AttackMarkerProjection(2, 1), AttackMarkerCensus.Project(slots, 17, 4, 9, -1, 0, 0));
+}
 
 static void ContactPublication()
 {
@@ -262,6 +281,14 @@ static void TargetCapturePaths()
     foreach (TargetReject reject in rejects) ExerciseCaptureFaults(new TargetReadFake(1, reject), 0);
     ExerciseCaptureFaults(new TargetReadFake(1, TargetReject.None), 1);
     ExerciseCaptureFaults(new TargetReadFake(16, TargetReject.None), 16);
+    var overflow = new AttackTargetCaptureState();
+    AttackTargetObservationPolicy.Capture(overflow, new TargetReadFake(17, TargetReject.None), TargetInput());
+    Equal(16, overflow.Count);
+    True(overflow.Overflowed);
+    var overflowResult = AttackTargetObservationPolicy.Observe(overflow,
+        new TargetReadFake(17, TargetReject.None) { ObserveMode = TargetObserveMode.HpDeath }, 3);
+    True(overflowResult.CaptureOverflowed);
+    True(!overflowResult.UniqueDefeat);
 }
 
 static void ExerciseCaptureFaults(TargetReadFake prototype, int expected)

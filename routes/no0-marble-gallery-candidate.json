@@ -1,0 +1,47 @@
+{
+  "schema": "coop-route/1",
+  "id": "no0-marble-gallery-candidate",
+  "version": 1,
+  "stage": "NO0",
+  "area": 0,
+  "displayName": "Candidate Marble Gallery bounded co-op route",
+  "verdict": "candidate-untested",
+  "qualification": "No room, terrain, enemy, transition, drop, reward, save, or soak claim is live-qualified by this manifest.",
+  "orderedRooms": [9, 10, 5, 6, 5, 10, 9, 19, 11, 19, 9],
+  "rooms": [
+    { "id": 5, "bounds": { "xMin": 26, "xMax": 28, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate west traversal turnaround", "limitations": "Static terrain and both transition edges require live qualification." },
+    { "id": 6, "bounds": { "xMin": 22, "xMax": 25, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate western turnaround", "limitations": "Do not use the west exit; room geometry is not qualified." },
+    { "id": 9, "bounds": { "xMin": 32, "xMax": 32, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate route start, return, combat setup, and branch junction", "limitations": "Exact spawn positions, enemy setups, and east branch remain live-gated." },
+    { "id": 10, "bounds": { "xMin": 29, "xMax": 31, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate transition and reconstruction corridor", "limitations": "The room 9 west-entry probe is setup-gated and unqualified." },
+    { "id": 11, "bounds": { "xMin": 36, "xMax": 36, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate eastern turnaround", "limitations": "Only the return edge to room 19 is in scope." },
+    { "id": 19, "bounds": { "xMin": 33, "xMax": 35, "yMin": 26, "yMax": 26, "basis": "confirmed-map-cells-not-walkable-world-geometry" }, "purpose": "candidate east branch corridor", "limitations": "South/elevator/Maria branching is excluded." }
+  ],
+  "segments": [
+    { "from": 9, "to": 10, "exit": "west", "entry": "east", "purpose": "initial transition reconstruction probe", "limitations": "Candidate only; start at the exact ordinary west exit setup." },
+    { "from": 10, "to": 5, "exit": "west", "entry": "east", "purpose": "continue west", "limitations": "Candidate static-terrain traversal only." },
+    { "from": 5, "to": 6, "exit": "west", "entry": "east", "purpose": "reach bounded western turnaround", "limitations": "Stop in room 6; west exit is excluded." },
+    { "from": 6, "to": 5, "exit": "east", "entry": "west", "purpose": "reverse transition evidence", "limitations": "Candidate only." },
+    { "from": 5, "to": 10, "exit": "east", "entry": "west", "purpose": "return corridor", "limitations": "Candidate only." },
+    { "from": 10, "to": 9, "exit": "east", "entry": "west", "purpose": "return to junction", "limitations": "Candidate only." },
+    { "from": 9, "to": 19, "exit": "east", "entry": "west", "purpose": "enter candidate east branch", "limitations": "Do not take south/elevator branches." },
+    { "from": 19, "to": 11, "exit": "east", "entry": "west", "purpose": "reach bounded eastern turnaround", "limitations": "Candidate only; no boss or branch claims." },
+    { "from": 11, "to": 19, "exit": "west", "entry": "east", "purpose": "reverse transition evidence", "limitations": "Candidate only." },
+    { "from": 19, "to": 9, "exit": "west", "entry": "east", "purpose": "complete candidate loop", "limitations": "Candidate only." }
+  ],
+  "excludedBranches": [
+    "west exit beyond room 6",
+    "south room 21",
+    "CEN elevator",
+    "Maria branch",
+    "bosses",
+    "water",
+    "shaped or moving terrain",
+    "projectile-through-wall claims"
+  ],
+  "globalLimitations": [
+    "Player 1 is the sole camera and transition owner.",
+    "Player 2 tether and suspension status is visible, but remains live-unqualified.",
+    "Bounded associated native drop metrics exist, but no live drop or reward evidence is qualified.",
+    "Room bounds are confirmed castle map cells only, not claims about walkable world geometry."
+  ]
+}

@@ -15,11 +15,24 @@ var tests = new List<(string Name, Action Run)>
     }),
     ("structured envelope identity", () =>
     {
-        string json = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden), new string('a', 32), 0, 30, 40);
+        string json = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden), new string('a', 32), 0, 30, 40,
+            EmptyMetrics());
         using JsonDocument document = JsonDocument.Parse(json);
-        Equal("p2d4/1", document.RootElement.GetProperty("schema").GetString());
+        Equal("p2d4/2", document.RootElement.GetProperty("schema").GetString());
         Equal(0, document.RootElement.GetProperty("generation").GetInt32());
         Equal(Golden, document.RootElement.GetProperty("legacy").GetString());
+        Equal(23, document.RootElement.GetProperty("fields").EnumerateObject().Count());
+        JsonElement metrics = document.RootElement.GetProperty("metrics");
+        Equal(99, metrics.EnumerateObject().Count());
+        Equal(JsonValueKind.Number, metrics.GetProperty("sessionRoomEpoch").ValueKind);
+        Equal(0L, metrics.GetProperty("attackExactOwnedLifetimeCurrent").GetInt64());
+        Equal(0L, metrics.GetProperty("attackExactOwnedLifetimeMaximum").GetInt64());
+        Equal(JsonValueKind.False, metrics.GetProperty("fatal").ValueKind);
+        Equal(JsonValueKind.String, metrics.GetProperty("errorCode").ValueKind);
+        foreach (JsonProperty metric in metrics.EnumerateObject())
+            if (metric.Value.ValueKind is not (JsonValueKind.Number or JsonValueKind.True or
+                JsonValueKind.False or JsonValueKind.String))
+                throw new InvalidOperationException($"Metric {metric.Name} is not scalar.");
     }),
     ("envelope generation mismatch rejected", () => RejectEnvelope(1)),
     ("duplicate key rejected", () => Reject(Golden.Replace(" H=W:0/0/0/0/0", " H=W:0/0/0/0/0 H=W:0/0/0/0/0"))),
@@ -42,6 +55,15 @@ var tests = new List<(string Name, Action Run)>
     ("Unicode digits rejected", () => Reject(Golden.Replace(" Q=0/0/0/0", " Q=٠/0/0/0"))),
     ("embedded newline rejected", () => Reject(Golden.Replace(" HU=W:E0/S0", " HU=W:E0/S0\n"))),
     ("oversized report rejected", () => Reject(Golden + new string('x', P2D4Report.MaximumUtf8Bytes)))
+    ,("virtual keyboard preference defaults and persists", () =>
+    {
+        var store = new PreferenceStore();
+        Equal(true, VirtualKeyboardPreference.Load(store));
+        VirtualKeyboardPreference.Persist(store, false);
+        Equal(false, VirtualKeyboardPreference.Load(store));
+        Equal(VirtualKeyboardPreference.Key, store.LastKey);
+        Equal(1, store.Saves);
+    })
 };
 
 int failures = 0;
@@ -79,7 +101,8 @@ static void RejectEnvelope(int generation)
 {
     try
     {
-        _ = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden), new string('a', 32), generation, 0, 0);
+        _ = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden), new string('a', 32), generation, 0, 0,
+            EmptyMetrics());
     }
     catch (ArgumentException)
     {
@@ -88,8 +111,55 @@ static void RejectEnvelope(int generation)
     throw new InvalidOperationException("Inconsistent envelope was accepted.");
 }
 
+static P2D4Metrics EmptyMetrics() => new(
+    SessionRoomEpoch: 0, TransitionPassed: 0, TransitionCompleted: 0,
+    ReconstructionAttempts: 0, ReconstructionSuccesses: 0, ReconstructionFailures: 0,
+    ReconstructionRetryCooldown: 0, ReconstructionRetries: 0,
+    ReconstructionSuppressedAttempts: 0, ReconstructionSuspensionReasonCode: 0,
+    TransitionPending: false, AwaitingPostTransitionMovement: false, TetherRecoveries: 0,
+    PostTransitionCommandedPixels: 0, PostTransitionMoved: false,
+    TransitionPendingUpdates: 0, TransitionPendingMaxUpdates: 0,
+    PostTransitionAbandonments: 0, TransitionReconstructionFailures: 0,
+    TetherPhase: 5, TetherReasonCode: 6, TetherWarningEntries: 0,
+    TetherResistanceEntries: 0, TetherReconstructionEntries: 0, TetherSuspensionEntries: 0,
+    TetherWarningFrames: 0, TetherWarningMaxConsecutive: 0, TetherResistanceFrames: 0,
+    TetherResistanceMaxConsecutive: 0, TetherReconstructionFrames: 0,
+    TetherReconstructionMaxConsecutive: 0, TetherSuspensionFrames: 0,
+    TetherSuspensionMaxConsecutive: 0, TetherOutwardResistance: false,
+    TetherStatusEligible: 0, TetherStatusSubmitted: 0, TetherHardRecoveries: 0,
+    HealthHp: 100, HealthDowned: false, HealthDamageEvents: 0, HealthDamageConsumed: 0,
+    HealthSuppressions: 0, HealthHitSuppressions: 0, HealthDowns: 0, HealthReviveStarts: 0,
+    HealthReviveCancels: 0, HealthRevives: 0, HealthRecoveries: 0, HealthInvariantFailures: 0,
+    AttackAllocations: 0, AttackContactAllocations: 0, AttackProjectileAllocations: 0,
+    AttackCleanups: 0, AttackLifecycleCancellations: 0, AttackFailures: 0, AttackTimingFailures: 0,
+    AttackContactWindows: 0, AttackProjectileWindows: 0, AttackContactNativeHits: 0,
+    AttackProjectileNativeHits: 0, AttackProjectileLifetime: 0,
+    AttackExactOwnedLifetimeCurrent: 0, AttackExactOwnedLifetimeMaximum: 0, AttackQuarantineSlot: -1,
+    AttackCleanupPending: false, AttackEquipmentRestoreFailures: 0, AttackMarkerCount: 0,
+    AttackOrphanMarkerCount: 0, AttackTargetOverflowEvents: 0, CompatibleTargetCurrent: 0,
+    EnemyNativeHits: 0, EnemyDefeats: 0, EnemyZeroHpHits: 0,
+    DropScans: 0, DropActive: 0, DropMaximumActive: 0, DropPrizeSpawns: 0,
+    DropEquipmentSpawns: 0, DropP2AssociatedSpawns: 0, DropAmbientSpawns: 0,
+    DropAmbiguousSpawns: 0, DropCausalDefeatsWithoutDrop: 0, DropTrackerOverflowEvents: 0,
+    DropTrackerFaulted: false, DropCollections: 0, DropExpirations: 0,
+    DropLifecycleDisappears: 0, DropReuses: 0, DropUnresolvedPickups: 0,
+    ObservedNativeExpEvents: 0, ObservedNativeExpDelta: 0,
+    ContactGuardChecks: 0, ContactGuardFailures: 0, ContactSuspended: false,
+    CollisionRestoreFailures: 0, VisualRestoreFailures: 0, Fatal: false, ErrorCode: "0",
+    ConfiguredProcessedPad2Available: false);
+
 static void Equal<T>(T expected, T actual)
 {
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
         throw new InvalidOperationException($"Expected {expected}, got {actual}.");
+}
+
+sealed class PreferenceStore : IBooleanPreferenceStore
+{
+    private bool? _value;
+    public string? LastKey { get; private set; }
+    public int Saves { get; private set; }
+    public bool GetBool(string key, bool defaultValue) { LastKey = key; return _value ?? defaultValue; }
+    public void SetBool(string key, bool value) { LastKey = key; _value = value; }
+    public void Save() => Saves++;
 }

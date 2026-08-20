@@ -236,12 +236,13 @@ public sealed class P2D4Report
 
 public static class P2D4DiagnosticsEnvelope
 {
-    public const string Schema = "p2d4/1";
+    public const string Schema = "p2d4/2";
     public const int MaximumUtf8Bytes = 64 * 1024;
 
     public static string Serialize(P2D4Report report, string sessionId, int generation, long modFrame,
-        long automationFrame)
+        long automationFrame, P2D4Metrics metrics)
     {
+        ArgumentNullException.ThrowIfNull(metrics);
         if (sessionId.Length != 32 || sessionId.Any(character => !IsHexDigit(character)))
             throw new ArgumentException("Session ID must be 32 hexadecimal characters.", nameof(sessionId));
         if (generation < 0 || generation != report.DiagnosticGeneration)
@@ -258,8 +259,9 @@ public static class P2D4DiagnosticsEnvelope
             modFrame,
             automationFrame,
             legacy = report.CanonicalLine,
-            fields = report.Fields
-        });
+            fields = report.Fields,
+            metrics
+        }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
         if (Encoding.UTF8.GetByteCount(json) > MaximumUtf8Bytes)
             throw new InvalidOperationException("Structured diagnostics exceed the response bound.");
         return json;
@@ -268,3 +270,106 @@ public static class P2D4DiagnosticsEnvelope
     private static bool IsHexDigit(char value) =>
         value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
 }
+
+// This is intentionally a closed, flat contract. Scenario automation may compare only these
+// scalar values; adding a metric requires an explicit p2d4 schema revision or compatible addition.
+public sealed record P2D4Metrics(
+    long SessionRoomEpoch,
+    long TransitionPassed,
+    long TransitionCompleted,
+    long ReconstructionAttempts,
+    long ReconstructionSuccesses,
+    long ReconstructionFailures,
+    long ReconstructionRetryCooldown,
+    long ReconstructionRetries,
+    long ReconstructionSuppressedAttempts,
+    long ReconstructionSuspensionReasonCode,
+    bool TransitionPending,
+    bool AwaitingPostTransitionMovement,
+    long TetherRecoveries,
+    long PostTransitionCommandedPixels,
+    bool PostTransitionMoved,
+    long TransitionPendingUpdates,
+    long TransitionPendingMaxUpdates,
+    long PostTransitionAbandonments,
+    long TransitionReconstructionFailures,
+    long TetherPhase,
+    long TetherReasonCode,
+    long TetherWarningEntries,
+    long TetherResistanceEntries,
+    long TetherReconstructionEntries,
+    long TetherSuspensionEntries,
+    long TetherWarningFrames,
+    long TetherWarningMaxConsecutive,
+    long TetherResistanceFrames,
+    long TetherResistanceMaxConsecutive,
+    long TetherReconstructionFrames,
+    long TetherReconstructionMaxConsecutive,
+    long TetherSuspensionFrames,
+    long TetherSuspensionMaxConsecutive,
+    bool TetherOutwardResistance,
+    long TetherStatusEligible,
+    long TetherStatusSubmitted,
+    long TetherHardRecoveries,
+    long HealthHp,
+    bool HealthDowned,
+    long HealthDamageEvents,
+    long HealthDamageConsumed,
+    long HealthSuppressions,
+    long HealthHitSuppressions,
+    long HealthDowns,
+    long HealthReviveStarts,
+    long HealthReviveCancels,
+    long HealthRevives,
+    long HealthRecoveries,
+    long HealthInvariantFailures,
+    long AttackAllocations,
+    long AttackContactAllocations,
+    long AttackProjectileAllocations,
+    long AttackCleanups,
+    long AttackLifecycleCancellations,
+    long AttackFailures,
+    long AttackTimingFailures,
+    long AttackContactWindows,
+    long AttackProjectileWindows,
+    long AttackContactNativeHits,
+    long AttackProjectileNativeHits,
+    long AttackProjectileLifetime,
+    long AttackExactOwnedLifetimeCurrent,
+    long AttackExactOwnedLifetimeMaximum,
+    long AttackQuarantineSlot,
+    bool AttackCleanupPending,
+    long AttackEquipmentRestoreFailures,
+    long AttackMarkerCount,
+    long AttackOrphanMarkerCount,
+    long AttackTargetOverflowEvents,
+    long CompatibleTargetCurrent,
+    long EnemyNativeHits,
+    long EnemyDefeats,
+    long EnemyZeroHpHits,
+    long DropScans,
+    long DropActive,
+    long DropMaximumActive,
+    long DropPrizeSpawns,
+    long DropEquipmentSpawns,
+    long DropP2AssociatedSpawns,
+    long DropAmbientSpawns,
+    long DropAmbiguousSpawns,
+    long DropCausalDefeatsWithoutDrop,
+    long DropTrackerOverflowEvents,
+    bool DropTrackerFaulted,
+    long DropCollections,
+    long DropExpirations,
+    long DropLifecycleDisappears,
+    long DropReuses,
+    long DropUnresolvedPickups,
+    long ObservedNativeExpEvents,
+    long ObservedNativeExpDelta,
+    long ContactGuardChecks,
+    long ContactGuardFailures,
+    bool ContactSuspended,
+    long CollisionRestoreFailures,
+    long VisualRestoreFailures,
+    bool Fatal,
+    string ErrorCode,
+    bool ConfiguredProcessedPad2Available);

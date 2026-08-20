@@ -47,10 +47,15 @@ validate_root "$current_root" "current"
 validate_root "$pinned_root" "v0.4.3b"
 
 dotnet run --project "$repo_root/.validation/CoopDiagnostics/CoopDiagnostics.csproj" --configuration Release
+dotnet run --project "$repo_root/.validation/CoopRouteManifest/CoopRouteManifest.csproj" --configuration Release
+dotnet run --project "$repo_root/.validation/CoopReleaseMatrix/CoopReleaseMatrix.csproj" --configuration Release
+dotnet run --project "$repo_root/.validation/CoopTetherPolicy/CoopTetherPolicy.csproj" --configuration Release
+dotnet run --project "$repo_root/.validation/CoopNativeDrop/CoopNativeDrop.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopManagedState/CoopManagedState.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopPad2Source/CoopPad2Source.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopManagedHealth/CoopManagedHealth.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopAttackLease/CoopAttackLease.csproj" --configuration Release
+dotnet run --project "$repo_root/.validation/CoopAttackLifetime/CoopAttackLifetime.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopAttackPublication/CoopAttackPublication.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopContactOpportunity/CoopContactOpportunity.csproj" --configuration Release
 dotnet run --project "$repo_root/.validation/CoopJumpForgiveness/CoopJumpForgiveness.csproj" --configuration Release

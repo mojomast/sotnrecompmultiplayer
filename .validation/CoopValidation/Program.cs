@@ -30,7 +30,8 @@ internal static partial class Program
         "PostHook:dra:RunMainEngine",
         "PostHook:dra:UpdatePlayerEntities",
         "PostHook:main:DrawOTag",
-        "PreHook:dra:RenderEntities"
+        "PreHook:dra:RenderEntities",
+        "PreHook:dra:RunMainEngine"
     ];
 
     private static readonly Dictionary<string, string> ExpectedConstants = new(StringComparer.Ordinal)
@@ -155,6 +156,15 @@ internal static partial class Program
             throw new InvalidOperationException("P2D4 must report the source Version value.");
         if (!source.Contains("return P2D4Report.Parse(report).CanonicalLine;", StringComparison.Ordinal))
             throw new InvalidOperationException("BuildReport must validate and canonicalize P2D4 output.");
+        string[] inputPreferenceContract =
+        [
+            "public const string Key = \"mods.coop-feasibility.virtualPlayer2Keyboard\";",
+            "store.GetBool(Key, true)",
+            "store.SetBool(Key, enabled)",
+            "store.Save();"
+        ];
+        if (inputPreferenceContract.Any(fragment => !source.Contains(fragment, StringComparison.Ordinal)))
+            throw new InvalidOperationException("Virtual Player 2 input preference must remain mod-scoped, persisted, and safe-defaulted.");
 
         string[] hooks = HookRegex().Matches(source)
             .Select(match => $"{match.Groups[1].Value}:{match.Groups[2].Value}:{match.Groups[3].Value}")
@@ -177,6 +187,19 @@ internal static partial class Program
             throw new InvalidOperationException("Indirect DealDamage dispatch is prohibited.");
         if (Regex.IsMatch(source, @"GameApi\s*\.\s*(?:Call|CallApi)\s*\("))
             throw new InvalidOperationException("M4 guest paths must use guarded direct dispatch, not allocating GameApi calls.");
+        string[] dropContracts =
+        [
+            "public const int FirstSlot = 160;", "public const int SlotCount = 32;",
+            "public const ushort PrizeEntityId = 3;", "public const ushort EquipmentEntityId = 10;",
+            "public const uint PrizeUpdate = 0x801C9220;",
+            "public const uint EquipmentUpdate = 0x801C9C34;",
+            "Native EXP has no validated read contract yet"
+        ];
+        if (dropContracts.Any(fragment => !source.Contains(fragment, StringComparison.Ordinal)))
+            throw new InvalidOperationException("NO0 native drop observation contract changed.");
+        int trackerStart = source.IndexOf("public sealed class NativeDropObservationTracker", StringComparison.Ordinal);
+        if (trackerStart < 0 || source[trackerStart..].Contains("WriteU", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native drop tracker must remain read-only.");
 
         int collisionStart = source.IndexOf("private bool TryCollision(", StringComparison.Ordinal);
         int collisionEnd = collisionStart < 0 ? -1 : source.IndexOf("private int CurrentHeadOffset", collisionStart,
@@ -202,6 +225,15 @@ internal static partial class Program
         if (!publication.Contains("uint function = _memory.ReadU32(AssignAttackerIdSlot);", StringComparison.Ordinal) ||
             !publication.Contains("CpuContextGuardedDirectCall.Invoke(_context, _memory, function, _entity, 0, 0, 0)", StringComparison.Ordinal))
             throw new InvalidOperationException("Native attack publication must use guarded direct dispatch.");
+        string[] markerCensusPaths =
+        [
+            "_attackStatus = \"ARMED\";\n            CensusOwnedAttackMarkers(memory);",
+            "ClearOwnedAttackMetadata(authorization);\n        CensusOwnedAttackMarkers(memory);",
+            "_attackStatus = \"QUARANTINE-CLEAN\";"
+        ];
+        if (markerCensusPaths.Any(fragment => !source.Contains(fragment, StringComparison.Ordinal)) ||
+            Regex.Matches(source, Regex.Escape("CensusOwnedAttackMarkers(memory);")).Count < 6)
+            throw new InvalidOperationException("Attack marker metrics must be refreshed in publication and cleanup updates.");
 
         int profileStart = source.IndexOf("private bool TryExtractAttackProfile(", StringComparison.Ordinal);
         int profileEnd = profileStart < 0 ? -1 : source.IndexOf("private void TrySpawnOwnedAttack(", profileStart,
@@ -243,10 +275,21 @@ internal static partial class Program
             "PrepareReconstructionCompletion(_continuation, ManagedMovementReconstructionResult.Selected)",
             "PrepareAllProxyPoses(_memory)",
             "CanCommitReconstructionCompletion(_session)",
+            "ReconstructionRetryPolicy.SafeUpdate(_reconstructionRetry)",
+            "if (retry.Command != ReconstructionRetryCommand.Retry)",
+            "SuspendContactScan(\"RETRY_WAIT\");",
         ];
         if (reconstructionEvidence.Any(fragment => !source.Contains(fragment, StringComparison.Ordinal)) ||
             source.Contains("private void InitializeProxyAt(", StringComparison.Ordinal))
             throw new InvalidOperationException("Live reconstruction must use the shared prepare/commit seam.");
+        int retryGate = source.IndexOf("ReconstructionRetryPolicy.SafeUpdate(_reconstructionRetry)",
+            StringComparison.Ordinal);
+        int roomObservation = source.IndexOf("_movementSession.ObserveSafeRoom(observedRoom.ManagedKey())",
+            StringComparison.Ordinal);
+        int reconstructionCall = source.IndexOf("ReconstructionRunResult reconstruction = TryReconstructProxy(",
+            StringComparison.Ordinal);
+        if (retryGate < 0 || roomObservation <= retryGate || reconstructionCall <= roomObservation)
+            throw new InvalidOperationException("Reconstruction retry suppression must precede session attempts and native probes.");
 
         ValidateOrdering(source, "private void OnPlayerLoaded(", "private void OnRoomLayerLoaded(",
             ["_movementSession.PlayerReloaded();", "_locomotionState.Invalidate();", "ResetManagedHealth();"]);

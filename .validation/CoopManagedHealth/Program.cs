@@ -60,6 +60,25 @@ var tests = new List<(string Name, Action Run)>
         True(!Observation(24, 32, playerTwoCircle: false).Eligible);
         True(!Observation(24, 32, roomStable: false).Eligible);
     }),
+    ("player one liveness ignores generic entity update", () =>
+    {
+        const uint genericEntityUpdate = 0;
+        True(PlayerOneLiveness.IsAlive(10, 0, 0));
+        Equal(0u, genericEntityUpdate);
+    }),
+    ("player one liveness rejects hp status and native death", () =>
+    {
+        True(!PlayerOneLiveness.IsAlive(0, 0, 0));
+        True(!PlayerOneLiveness.IsAlive(10, PlayerOneLiveness.DeadStatusMask, 0));
+        True(!PlayerOneLiveness.IsAlive(10, 0, PlayerOneLiveness.DeathStep));
+    }),
+    ("player one compatibility retains character control and transform gates", () =>
+    {
+        True(PlayerOneLiveness.IsCompatible(10, 0, 0, true, true));
+        True(!PlayerOneLiveness.IsCompatible(10, 0, 0, false, true));
+        True(!PlayerOneLiveness.IsCompatible(10, 0, 0, true, false));
+        True(!PlayerOneLiveness.IsCompatible(10, PlayerOneLiveness.TransformStatusMask, 0, true, true));
+    }),
     ("revive completion preserves timer ordering", () =>
     {
         ManagedHealthState state = ManagedHealthMachine.Reset();

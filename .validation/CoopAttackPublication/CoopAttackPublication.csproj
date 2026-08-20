@@ -8,6 +8,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../source/AttackMarkerCensus.cs" Link="AttackMarkerCensus.cs" />
     <Compile Include="../../source/AttackPublicationPolicy.cs" Link="AttackPublicationPolicy.cs" />
     <Compile Include="../../source/AttackTargetObservationPolicy.cs" Link="AttackTargetObservationPolicy.cs" />
     <Compile Include="../../source/AttackResetPreflight.cs" Link="AttackResetPreflight.cs" />

@@ -106,6 +106,23 @@ var tests = new List<(string Name, Action Run)>
         Equal(1, session.State.PassedTransitions);
         False(session.State.AwaitingPostTransitionMovement);
     }),
+    ("transition duration failure and abandonment evidence is truthful", () =>
+    {
+        ManagedMovementSessionReducer completed = ChangedRoomTransition();
+        Equal(0, completed.State.TransitionPendingUpdates);
+        Equal(ManagedMovementSessionReducer.TransitionStableUpdates,
+            completed.State.TransitionPendingMaxUpdates);
+        completed.ObserveSafeRoom(Room(3));
+        Equal(1, completed.State.PostTransitionAbandonments);
+
+        ManagedMovementSessionReducer failed = Active(Room(1));
+        failed.ObserveSafeRoom(Room(2));
+        failed.ObserveSafeRoom(Room(2));
+        ManagedMovementSessionTransition reconstruction = failed.ObserveSafeRoom(Room(2));
+        failed.CompleteReconstruction(reconstruction.Reconstruction,
+            ManagedMovementReconstructionResult.NoSafeCandidate);
+        Equal(1, failed.State.TransitionReconstructionFailures);
+    }),
     ("reload reset fatal and unload phases fail closed", () =>
     {
         ManagedMovementSessionReducer session = Active(Room(1));
@@ -232,6 +249,13 @@ var tests = new List<(string Name, Action Run)>
         ManagedMovementSessionState attemptBefore = attempts.State;
         RejectOverflow(() => attempts.ObserveSafeRoom(Room(1)));
         EqualState(attemptBefore, attempts.State);
+
+        ManagedMovementSessionReducer pending = Active(Room(1));
+        pending.RoomLayerLoaded();
+        SetField(pending, "_transitionPendingUpdates", int.MaxValue);
+        ManagedMovementSessionState pendingBefore = pending.State;
+        RejectOverflow(pending.ObserveUnsafe);
+        EqualState(pendingBefore, pending.State);
     }),
     ("generated lifecycle replay is deterministic", () =>
     {

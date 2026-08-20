@@ -8,8 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../source/P2D4Report.cs" Link="P2D4Report.cs" />
-    <Compile Include="../../source/VirtualKeyboardPreference.cs" Link="VirtualKeyboardPreference.cs" />
+    <Compile Include="../../source/TetherSuspensionPolicy.cs" Link="TetherSuspensionPolicy.cs" />
+    <Compile Include="../../source/ReconstructionRetryPolicy.cs" Link="ReconstructionRetryPolicy.cs" />
+    <Compile Include="../../source/RouteTransitionAggregate.cs" Link="RouteTransitionAggregate.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>

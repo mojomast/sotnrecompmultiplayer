@@ -1,0 +1,37 @@
+{
+  "schema": "m5-release-matrix/1",
+  "id": "coop-m5-live-release",
+  "version": 1,
+  "status": "live-blocked",
+  "claims": "This manifest defines objectives only. It contains no completion evidence and authorizes no save automation.",
+  "objectives": {
+    "coldLaunches": 3,
+    "routeRuns": 3,
+    "consecutiveTransitions": 25,
+    "contactHits": 1,
+    "projectileHits": 1,
+    "associatedDrops": 1,
+    "revives": 1,
+    "playableSoakMinutes": 60,
+    "soakSamples": 13
+  },
+  "workflow": [
+    { "id": "cold-launch", "repeat": 3, "approval": "Human approves launch and selects an existing Alucard save through the visible native UI.", "observe": "Record sanitized build/mod/session identity and safe Play state; do not claim a cold launch from a reload or reset." },
+    { "id": "route", "repeat": 3, "approval": "Human prepares Marble Gallery room 9 and physically plays the declared ordered route.", "observe": "Run coop-route-25 where required and retain transition counters, frames, room sequence, cleanup, and private artifact ID." },
+    { "id": "combat", "repeat": 1, "approval": "Human curates ordinary supported enemies and explicitly performs contact, projectile, drop attempts, downing, and revive.", "observe": "Retain p2d4/2 metric deltas; a native no-drop attempt is not associated-drop completion." },
+    { "id": "save-enabled", "repeat": 1, "approval": "Human saves through the native menu with coop-feasibility enabled and confirms the visible slot.", "observe": "Record only visible slot label/time and sanitized runtime identity; never copy, hash, parse, or write save bytes." },
+    { "id": "restart-disabled", "repeat": 1, "approval": "Human fully exits, disables the mod before restart, and approves loading that visible native save.", "observe": "Record successful ordinary Play and visible progression checks without direct save access." },
+    { "id": "playable-soak", "repeat": 1, "approval": "Human starts coop-soak-60m and actively plays the declared route and ordinary combat for the full hour.", "observe": "Retain 13 scheduled samples and private screenshots at minutes 0, 30, and 60. Idle observation is stability evidence only." }
+  ],
+  "privateEvidenceFields": [
+    "artifactId", "buildVersion", "modVersion", "diagnosticSession", "diagnosticGeneration",
+    "startedUtc", "endedUtc", "monotonicElapsedSeconds", "stateFrames", "diagnosticFrames",
+    "roomSequence", "metricDeltas", "sampleHashes", "cleanupVerified", "humanApprovalNote"
+  ],
+  "prohibitions": [
+    "No direct save loading, save writes, save parsing, save copying, or save hashes.",
+    "No filesystem paths, disc paths, credentials, tokens, desktop captures, or raw logs in success evidence.",
+    "No launch, stop, reset, reload, mod mutation, file selection, or gameplay input by observer campaigns.",
+    "Do not claim cold-launch, save-integrity, route, combat, drop, revive, or playable-soak completion until humans perform it live."
+  ]
+}

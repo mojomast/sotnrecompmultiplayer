@@ -67,6 +67,10 @@ public readonly struct ManagedMovementSessionState
     public readonly int CompletedTransitions;
     public readonly int PassedTransitions;
     public readonly int RoomLayerEvents;
+    public readonly int TransitionPendingUpdates;
+    public readonly int TransitionPendingMaxUpdates;
+    public readonly int PostTransitionAbandonments;
+    public readonly int TransitionReconstructionFailures;
 
     internal ManagedMovementSessionState(ulong revision, ManagedMovementSessionPhase phase,
         bool roomKnown, ManagedRoomKey room, int safeUpdates, int roomStableUpdates,
@@ -75,7 +79,9 @@ public readonly struct ManagedMovementSessionState
         bool postTransitionMoved, long postTransitionCommandedRaw, int reconstructionAttempts,
         int reconstructionSuccesses, int reconstructionFailures, int tetherRecoveries,
         int manualResetRequests, int manualResetCompletions, int completedTransitions,
-        int passedTransitions, int roomLayerEvents)
+        int passedTransitions, int roomLayerEvents, int transitionPendingUpdates,
+        int transitionPendingMaxUpdates, int postTransitionAbandonments,
+        int transitionReconstructionFailures)
     {
         Revision = revision;
         Phase = phase;
@@ -99,6 +105,10 @@ public readonly struct ManagedMovementSessionState
         CompletedTransitions = completedTransitions;
         PassedTransitions = passedTransitions;
         RoomLayerEvents = roomLayerEvents;
+        TransitionPendingUpdates = transitionPendingUpdates;
+        TransitionPendingMaxUpdates = transitionPendingMaxUpdates;
+        PostTransitionAbandonments = postTransitionAbandonments;
+        TransitionReconstructionFailures = transitionReconstructionFailures;
     }
 }
 
@@ -129,11 +139,12 @@ public readonly struct ManagedMovementReconstructionCompletion
     internal readonly int CompletedTransitions;
     internal readonly bool CompleteTransition;
     internal readonly bool ChangedTransition;
+    internal readonly int TransitionReconstructionFailures;
 
     internal ManagedMovementReconstructionCompletion(long ownerId, ulong expectedRevision,
         ulong nextRevision, ManagedMovementReconstructionResult result, int successes, int failures,
         int resetCompletions, int completedTransitions, bool completeTransition,
-        bool changedTransition)
+        bool changedTransition, int transitionReconstructionFailures)
     {
         OwnerId = ownerId;
         ExpectedRevision = expectedRevision;
@@ -145,6 +156,7 @@ public readonly struct ManagedMovementReconstructionCompletion
         CompletedTransitions = completedTransitions;
         CompleteTransition = completeTransition;
         ChangedTransition = changedTransition;
+        TransitionReconstructionFailures = transitionReconstructionFailures;
     }
 }
 
@@ -196,6 +208,10 @@ public sealed class ManagedMovementSessionReducer
     private int _completedTransitions;
     private int _passedTransitions;
     private int _roomLayerEvents;
+    private int _transitionPendingUpdates;
+    private int _transitionPendingMaxUpdates;
+    private int _postTransitionAbandonments;
+    private int _transitionReconstructionFailures;
     private ulong _pendingReconstructionRevision;
 
     public ManagedMovementSessionReducer(RoomEpochTracker roomEpoch)
@@ -209,7 +225,9 @@ public sealed class ManagedMovementSessionReducer
         _postTransitionMoved, _postTransitionCommandedRaw, _reconstructionAttempts,
         _reconstructionSuccesses, _reconstructionFailures, _tetherRecoveries,
         _manualResetRequests, _manualResetCompletions, _completedTransitions,
-        _passedTransitions, _roomLayerEvents);
+        _passedTransitions, _roomLayerEvents, _transitionPendingUpdates,
+        _transitionPendingMaxUpdates, _postTransitionAbandonments,
+        _transitionReconstructionFailures);
 
     public ulong RoomEpoch => _roomEpoch.Epoch;
     public bool SnapshotEligible => _phase == ManagedMovementSessionPhase.Active &&
@@ -234,10 +252,14 @@ public sealed class ManagedMovementSessionReducer
         if (willRequest) _ = IncrementChecked(_reconstructionAttempts);
         if (WillCompleteChangedTransition(room, roomChanges, _proxyInitialized))
             _ = IncrementChecked(_completedTransitions);
+        if (_transitionPending) _ = IncrementChecked(_transitionPendingUpdates);
+        if (roomChanges && _awaitingPostTransitionMovement)
+            _ = IncrementChecked(_postTransitionAbandonments);
         if (roomChanges && !_transitionPending && _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
         ObserveRoom(room);
+        CountTransitionPendingUpdate();
         _safeUpdates = IncrementSaturating(_safeUpdates);
         CompleteTransitionIfReady();
         if ((!_proxyInitialized || _manualResetPending) && _safeUpdates >= StabilizationUpdates)
@@ -258,7 +280,9 @@ public sealed class ManagedMovementSessionReducer
         RequireOperational();
         if (_pendingReconstructionRevision != 0)
             throw new InvalidOperationException("A reconstruction result is still pending.");
+        if (_transitionPending) _ = IncrementChecked(_transitionPendingUpdates);
         AdvanceRevision();
+        CountTransitionPendingUpdate();
         _safeUpdates = 0;
         _phase = ManagedMovementSessionPhase.WaitingForSafeUpdate;
     }
@@ -290,6 +314,7 @@ public sealed class ManagedMovementSessionReducer
         int failures = _reconstructionFailures;
         int resetCompletions = _manualResetCompletions;
         int completedTransitions = _completedTransitions;
+        int transitionReconstructionFailures = _transitionReconstructionFailures;
         bool completeTransition = result == ManagedMovementReconstructionResult.Selected &&
             _transitionPending && _roomStableUpdates >= TransitionStableUpdates;
         bool changedTransition = completeTransition && !_transitionOrigin.Equals(_room);
@@ -301,9 +326,11 @@ public sealed class ManagedMovementSessionReducer
         }
         else if (result == ManagedMovementReconstructionResult.NoSafeCandidate)
             failures = IncrementChecked(failures);
+        if (result != ManagedMovementReconstructionResult.Selected && _transitionPending)
+            transitionReconstructionFailures = IncrementChecked(transitionReconstructionFailures);
         return new ManagedMovementReconstructionCompletion(_ownerId, _revision, nextRevision, result,
             successes, failures, resetCompletions, completedTransitions, completeTransition,
-            changedTransition);
+            changedTransition, transitionReconstructionFailures);
     }
 
     public bool CanCommitReconstructionCompletion(ManagedMovementReconstructionCompletion completion) =>
@@ -329,6 +356,7 @@ public sealed class ManagedMovementSessionReducer
         _reconstructionFailures = completion.Failures;
         _manualResetCompletions = completion.ResetCompletions;
         _completedTransitions = completion.CompletedTransitions;
+        _transitionReconstructionFailures = completion.TransitionReconstructionFailures;
         if (completion.Result == ManagedMovementReconstructionResult.Selected)
         {
             _proxyInitialized = true;
@@ -341,6 +369,7 @@ public sealed class ManagedMovementSessionReducer
             if (completion.CompleteTransition)
             {
                 _transitionPending = false;
+                _transitionPendingUpdates = 0;
                 _roomEpoch.Complete(_room);
                 if (completion.ChangedTransition)
                 {
@@ -408,6 +437,7 @@ public sealed class ManagedMovementSessionReducer
     {
         RequireOperational();
         int events = IncrementChecked(_roomLayerEvents);
+        if (_awaitingPostTransitionMovement) _ = IncrementChecked(_postTransitionAbandonments);
         if (_roomKnown && !_transitionPending && _roomEpoch.Epoch == ulong.MaxValue)
             throw new InvalidOperationException("Room epoch exhausted.");
         AdvanceRevision();
@@ -426,6 +456,7 @@ public sealed class ManagedMovementSessionReducer
         _roomKnown = false;
         _room = default;
         _transitionPending = false;
+        _transitionPendingUpdates = 0;
         _awaitingPostTransitionMovement = false;
         _postTransitionMoved = false;
         InvalidateProxyForTransition();
@@ -466,6 +497,8 @@ public sealed class ManagedMovementSessionReducer
         _reconstructionAttempts = _reconstructionSuccesses = _reconstructionFailures = 0;
         _tetherRecoveries = _manualResetRequests = _manualResetCompletions = 0;
         _completedTransitions = _passedTransitions = _roomLayerEvents = 0;
+        _transitionPendingUpdates = _transitionPendingMaxUpdates = 0;
+        _postTransitionAbandonments = _transitionReconstructionFailures = 0;
         _pendingReconstructionRevision = 0;
         _phase = ManagedMovementSessionPhase.WaitingForSafeUpdate;
         return true;
@@ -541,6 +574,7 @@ public sealed class ManagedMovementSessionReducer
         }
         if (_awaitingPostTransitionMovement)
         {
+            _postTransitionAbandonments = IncrementChecked(_postTransitionAbandonments);
             _awaitingPostTransitionMovement = false;
             _postTransitionMoved = false;
         }
@@ -556,6 +590,7 @@ public sealed class ManagedMovementSessionReducer
     {
         if (!_transitionPending || _roomStableUpdates < TransitionStableUpdates || !_proxyInitialized) return;
         _transitionPending = false;
+        _transitionPendingUpdates = 0;
         _roomEpoch.Complete(_room);
         if (_transitionOrigin.Equals(_room)) return;
         _completedTransitions = IncrementChecked(_completedTransitions);
@@ -579,6 +614,14 @@ public sealed class ManagedMovementSessionReducer
         _roomStableUpdates = 0;
         _pendingReconstructionRevision = 0;
         _phase = ManagedMovementSessionPhase.TransitionPending;
+    }
+
+    private void CountTransitionPendingUpdate()
+    {
+        if (!_transitionPending) return;
+        _transitionPendingUpdates = IncrementChecked(_transitionPendingUpdates);
+        if (_transitionPendingUpdates > _transitionPendingMaxUpdates)
+            _transitionPendingMaxUpdates = _transitionPendingUpdates;
     }
 
     private void RequireOperational()

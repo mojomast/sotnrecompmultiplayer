@@ -8,8 +8,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../source/P2D4Report.cs" Link="P2D4Report.cs" />
-    <Compile Include="../../source/VirtualKeyboardPreference.cs" Link="VirtualKeyboardPreference.cs" />
+    <Compile Include="../../source/ExactOwnedAttackLifetime.cs" Link="ExactOwnedAttackLifetime.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>

@@ -263,7 +263,11 @@ public sealed class CoopFeasibility : IMod
     private ref uint _attackQuarantineGeneration => ref _attackLease.QuarantineGeneration;
     private ref uint _attackQuarantineRoomHash => ref _attackLease.QuarantineRoomHash;
     private long _attackAllocations;
+    private long _attackContactAllocations;
+    private long _attackProjectileAllocations;
     private long _attackNormalEngineWindows;
+    private long _attackContactWindows;
+    private long _attackProjectileNormalWindows;
     private long _attackCleanups;
     private long _attackLifecycleCancellations;
     private long _attackFailures;
@@ -292,6 +296,12 @@ public sealed class CoopFeasibility : IMod
     private int _projectileOriginX;
     private int _projectileLifetime;
     private long _projectileWindows;
+    private int _attackContactNativeHits;
+    private int _attackProjectileNativeHits;
+    private ExactOwnedAttackLifetime _exactOwnedAttackLifetime;
+    private int _attackMarkerCount;
+    private int _attackOrphanMarkerCount;
+    private long _attackTargetOverflowEvents;
     private int _profileExtractions;
     private int _profileExtractionFailures;
     private int _equipmentRestoreChecks;
@@ -300,6 +310,7 @@ public sealed class CoopFeasibility : IMod
     private long _enemyDiagnosticScans;
     private long _enemyNativeCandidateSamples;
     private long _enemyCompatibleCandidateSamples;
+    private int _compatibleTargetCurrent;
     private int _nearestTargetSlot = -1;
     private ushort _nearestTargetEntityId;
     private ushort _nearestTargetEnemyId;
@@ -311,6 +322,8 @@ public sealed class CoopFeasibility : IMod
     private int _defeatedTargets;
     private int _compatibleZeroHpHits;
     private string _enemyDiagnosticStatus = "WAIT";
+    private readonly NativeDropObservationTracker _dropTracker = new();
+    private bool _dropWindowOpen;
 
     private bool _awarenessDisabled;
     private long _awarenessCalls;
@@ -400,6 +413,9 @@ public sealed class CoopFeasibility : IMod
     private int _passedTransitions => _movementSession.State.PassedTransitions;
     private readonly RoomEpochTracker _roomEpochTracker = new();
     private readonly ManagedMovementSessionReducer _movementSession;
+    private readonly TetherSuspensionReducer _tetherPolicy = new();
+    private ReconstructionRetryState _reconstructionRetry = ReconstructionRetryPolicy.Initial;
+    private TetherReason _reconstructionTriggerReason = TetherReason.Reconstruction;
     private long _postTransitionCommandedRaw => _movementSession.State.PostTransitionCommandedRaw;
     private bool _awaitingPostTransitionMovement => _movementSession.State.AwaitingPostTransitionMovement;
     private bool _postTransitionMoved => _movementSession.State.PostTransitionMoved;
@@ -411,8 +427,19 @@ public sealed class CoopFeasibility : IMod
 
     public CoopFeasibility()
     {
+        // This is the only persisted co-op preference.  Missing or malformed configuration
+        // deliberately keeps the safer keyboard source enabled.
+        _virtualKeyboard = VirtualKeyboardPreference.Load(new RuntimePreferenceStore());
         _movementSession = new ManagedMovementSessionReducer(_roomEpochTracker);
         _attackPublicationAdapter = new NativeAttackPublicationAdapter(this);
+    }
+
+    private sealed class RuntimePreferenceStore : IBooleanPreferenceStore
+    {
+        public bool GetBool(string key, bool defaultValue) =>
+            RecompOne.Runtime.Runtime.View.GetBool(key, defaultValue);
+        public void SetBool(string key, bool value) => RecompOne.Runtime.Runtime.View.SetBool(key, value);
+        public void Save() => RecompOne.Runtime.Runtime.SaveView();
     }
 
     // This is the only bridge used by the attack publication policy. The policy itself has no
@@ -555,6 +582,7 @@ public sealed class CoopFeasibility : IMod
     public void OnLoad()
     {
         _pad2Source.Reset();
+        _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
         _movementSession.Load();
         _instance = this;
         Event.AddListener<VSyncEvent>(OnVSync);
@@ -582,10 +610,13 @@ public sealed class CoopFeasibility : IMod
             Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
             Event.RemoveListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
             _movementSession.Unload();
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _locomotionState.Invalidate();
             DisarmAwareness("UNLOAD");
             ClearJumpForgiveness();
             SuspendContactScan("UNLOAD");
+            _dropTracker.Cancel();
+            _dropWindowOpen = false;
         }
     }
 
@@ -611,6 +642,7 @@ public sealed class CoopFeasibility : IMod
             _attackLifecycleCancellations++;
             _attackStatus = "CLEAN:UNLOAD";
             ClearOwnedAttackMetadata(authorization);
+            CensusOwnedAttackMarkers(memory);
             return;
         }
 
@@ -621,13 +653,69 @@ public sealed class CoopFeasibility : IMod
             StopQuarantinedMutation(request, evidence);
         else
             StopResidualAttackMutation(request, evidence);
+        CensusOwnedAttackMarkers(memory);
     }
 
     public string CaptureAutomationDiagnostics(long automationFrame)
     {
         P2D4Report report = P2D4Report.Parse(BuildReport());
         return P2D4DiagnosticsEnvelope.Serialize(report, _diagnosticSessionId, _diagnosticGeneration,
-            _diagnosticFrame, automationFrame);
+            _diagnosticFrame, automationFrame, BuildMetrics());
+    }
+
+    private P2D4Metrics BuildMetrics()
+    {
+        NativeDropDiagnostics drops = _dropTracker.Diagnostics;
+        return new(
+        checked((long)_movementSession.RoomEpoch), _passedTransitions, _completedTransitions,
+        _reconstructionAttempts, _reconstructionSuccesses, _reconstructionFailures,
+        _reconstructionRetry.CooldownRemaining, checked((long)_reconstructionRetry.Retries),
+        checked((long)_reconstructionRetry.SuppressedAttempts), (long)_reconstructionRetry.Reason,
+        _transitionPending, _awaitingPostTransitionMovement, _tetherRecoveries,
+        _postTransitionCommandedRaw >> 16, _postTransitionMoved,
+        _movementSession.State.TransitionPendingUpdates,
+        _movementSession.State.TransitionPendingMaxUpdates,
+        _movementSession.State.PostTransitionAbandonments,
+        _movementSession.State.TransitionReconstructionFailures,
+        (long)_tetherPolicy.Diagnostics.Phase, (long)_tetherPolicy.Diagnostics.Reason,
+        checked((long)_tetherPolicy.Diagnostics.WarningEntries),
+        checked((long)_tetherPolicy.Diagnostics.ResistanceEntries),
+        checked((long)_tetherPolicy.Diagnostics.ReconstructionEntries),
+        checked((long)_tetherPolicy.Diagnostics.SuspensionEntries),
+        checked((long)_tetherPolicy.Diagnostics.WarningFrames),
+        checked((long)_tetherPolicy.Diagnostics.WarningMaxConsecutive),
+        checked((long)_tetherPolicy.Diagnostics.ResistanceFrames),
+        checked((long)_tetherPolicy.Diagnostics.ResistanceMaxConsecutive),
+        checked((long)_tetherPolicy.Diagnostics.ReconstructionFrames),
+        checked((long)_tetherPolicy.Diagnostics.ReconstructionMaxConsecutive),
+        checked((long)_tetherPolicy.Diagnostics.SuspensionFrames),
+        checked((long)_tetherPolicy.Diagnostics.SuspensionMaxConsecutive),
+        _tetherPolicy.Diagnostics.OutwardResistance,
+        checked((long)_tetherPolicy.Diagnostics.StatusEligible),
+        checked((long)_tetherPolicy.Diagnostics.StatusSubmitted),
+        checked((long)_tetherPolicy.Diagnostics.HardRecoveries),
+        _managedHp, _downed, _damageEvents, _damageConsumed, _damageSuppressedInvul,
+        _damageSuppressedHitInvul, _downedCount, _reviveStarts, _reviveCancels, _revives,
+        _reviveRecoveries, _healthInvariantFailures, _attackAllocations,
+        _attackContactAllocations, _attackProjectileAllocations, _attackCleanups,
+        _attackLifecycleCancellations, _attackFailures, _attackTimingFailures,
+        _attackContactWindows, _attackProjectileNormalWindows, _attackContactNativeHits,
+        _attackProjectileNativeHits, _projectileLifetime, _exactOwnedAttackLifetime.Current,
+        _exactOwnedAttackLifetime.Maximum, _attackQuarantineSlot,
+        _attackCleanupPending, _equipmentRestoreFailures, _attackMarkerCount,
+        _attackOrphanMarkerCount, _attackTargetOverflowEvents, _compatibleTargetCurrent,
+        _nativeTargetHits, _defeatedTargets, _compatibleZeroHpHits,
+        checked((long)drops.Scans), checked((long)drops.Active), checked((long)drops.MaximumActive),
+        checked((long)drops.PrizeSpawns), checked((long)drops.EquipmentSpawns),
+        checked((long)drops.P2AssociatedSpawns), checked((long)drops.AmbientSpawns),
+        checked((long)drops.AmbiguousSpawns), checked((long)drops.CausalDefeatsWithoutDrop),
+        checked((long)drops.OverflowEvents), drops.Faulted, checked((long)drops.Collections),
+        checked((long)drops.Expirations), checked((long)drops.LifecycleDisappears),
+        checked((long)drops.Reuses), checked((long)drops.UnresolvedPickups),
+        checked((long)drops.ObservedNativeExpEvents), checked((long)drops.ObservedNativeExpDelta),
+        _contactGuardChecks, _contactGuardFailures, _contactOpportunities.Suspended,
+        _collisionRestoreFailures, _independentRestoreFailures, _fatal, ErrorCode(),
+        _pad2Source.ProcessedInputLatched);
     }
 
     public bool TryResetAutomationDiagnostics(string sessionId, int expectedGeneration)
@@ -824,6 +912,10 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             _pad2Source.Reset();
             _movementSession.PlayerReloaded();
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                TetherLifecycle.Inactive, TetherReason.Lifecycle));
             _locomotionState.Invalidate();
             DisarmAwareness("PLAYER");
             ClearJumpForgiveness();
@@ -833,6 +925,8 @@ public sealed class CoopFeasibility : IMod
             SuspendContactScan("PLAYER");
             CancelOwnedAttack("PLAYER");
             ClearLatchedAttackProfile();
+            _dropTracker.Cancel();
+            _dropWindowOpen = false;
             ResetManagedHealth();
             _safeReason = e.Character == PlayableCharacter.Alucard
                 ? "Player loaded; waiting for a stable room"
@@ -852,6 +946,10 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             BeginTransition();
             _movementSession.RoomLayerLoaded();
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                TetherLifecycle.Transition, TetherReason.Transition));
             _locomotionState.Invalidate();
             DisarmAwareness("TRANS");
             ClearJumpForgiveness();
@@ -860,6 +958,8 @@ public sealed class CoopFeasibility : IMod
             SuspendContactScan("TRANS");
             CancelOwnedAttack("TRANS");
             ClearLatchedAttackProfile();
+            _dropTracker.Cancel();
+            _dropWindowOpen = false;
             _visualConfirmed = false;
             _safeReason = $"Room layer event: stage 0x{e.StageId:X2}, layer {e.LayerIndex}";
         }
@@ -867,6 +967,15 @@ public sealed class CoopFeasibility : IMod
         {
             Fail("RoomLayer event", ex);
         }
+    }
+
+    [PreHook("dra", "RunMainEngine")]
+    private static void BeforeMainEngine(CpuContext context, IMemory memory)
+    {
+        CoopFeasibility? mod = _instance;
+        if (mod == null || mod._fatal) return;
+        try { mod.BeginDropObservation(memory); }
+        catch (Exception ex) { mod.Fail("native drop pre-window", ex); }
     }
 
     [PostHook("dra", "RunMainEngine")]
@@ -877,6 +986,7 @@ public sealed class CoopFeasibility : IMod
         try
         {
             mod._mainEngineCalls++;
+            mod.UpdateExactOwnedAttackLifetime(memory);
             if (!Game.Available || !Game.InGame)
             {
                 mod.SuspendContactScan("WAIT");
@@ -887,6 +997,7 @@ public sealed class CoopFeasibility : IMod
             mod._gameSeen |= mod._gamePressed;
             mod._tapSeen |= mod._gameTapped;
             mod.ObserveOwnedAttackWindow(memory);
+            mod.CompleteDropObservation(memory);
             mod.UpdateContactShadow(memory);
         }
         catch (Exception ex)
@@ -969,6 +1080,7 @@ public sealed class CoopFeasibility : IMod
     {
         CoopFeasibility? mod = _instance;
         if (mod == null) return;
+        if (!CoopStatusRenderPolicy.DirectCallsAllowed(mod._fatal)) return;
         try
         {
             mod.PrepareNativeSpriteCapture(memory);
@@ -1001,10 +1113,10 @@ public sealed class CoopFeasibility : IMod
     {
         CoopFeasibility? mod = _instance;
         if (mod == null) return;
+        if (!CoopStatusRenderPolicy.DirectCallsAllowed(mod._fatal)) return;
         try
         {
             mod._drawOtCalls++;
-            if (mod._fatal) return;
             mod.DrawProxyGp0(context, memory);
         }
         catch (Exception ex)
@@ -1029,6 +1141,9 @@ public sealed class CoopFeasibility : IMod
         }
         if (!_enabled || !_safeFrame)
         {
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                _fatal ? TetherLifecycle.Fatal : TetherLifecycle.Inactive,
+                CurrentUnsafeTetherReason()));
             _movementSession.ObserveUnsafe();
             ClearJumpForgiveness();
             if (_reinitializeRequested)
@@ -1038,7 +1153,26 @@ public sealed class CoopFeasibility : IMod
 
         RoomIdentity observedRoom = ReadRoomIdentity(memory);
         bool roomChanged = _roomKnown && !_room.Equals(observedRoom);
-        if (roomChanged) BeginTransition();
+        if (roomChanged)
+        {
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
+            BeginTransition();
+        }
+        bool retryProbe = false;
+        if (_reconstructionRetry.Active && !roomChanged)
+        {
+            ReconstructionRetryTransition retry = ReconstructionRetryPolicy.SafeUpdate(_reconstructionRetry);
+            _reconstructionRetry = retry.State;
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                TetherLifecycle.Active, _reconstructionRetry.Reason));
+            if (retry.Command != ReconstructionRetryCommand.Retry)
+            {
+                SuspendContactScan("RETRY_WAIT");
+                return;
+            }
+            retryProbe = true;
+        }
         _room = observedRoom;
         ManagedMovementSessionTransition movement = _movementSession.ObserveSafeRoom(observedRoom.ManagedKey());
         if (roomChanged)
@@ -1048,6 +1182,9 @@ public sealed class CoopFeasibility : IMod
         }
         if (movement.ReconstructionRequested)
         {
+            if (!retryProbe)
+                _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                    TetherLifecycle.Reconstructing, TetherReason.Reconstruction));
             bool requested = _reinitializeRequested;
             ReconstructionRunResult reconstruction = TryReconstructProxy(context, memory,
                 requested ? "RESET" : "ROOM", movement.Reconstruction);
@@ -1058,9 +1195,18 @@ public sealed class CoopFeasibility : IMod
                         : ManagedMovementReconstructionResult.AdapterFault);
             if (reconstruction != ReconstructionRunResult.Selected)
             {
-                if (_collisionQueryFailed || _collisionDisabled) AbortCollisionFrame(memory);
+                ArmReconstructionRetry();
+                if (_collisionQueryFailed || _collisionDisabled)
+                {
+                    _safeFrame = false;
+                    _safeCode = _collisionDisabled ? "COL" : "SHAPE";
+                    _safeReason = _collisionFailureReason;
+                    CleanupOwnedAttack(memory, "RECON-COLLISION");
+                }
                 return;
             }
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
             if (requested)
             {
                 _operationStatus = "Proxy reset completed beside Player 1";
@@ -1074,6 +1220,8 @@ public sealed class CoopFeasibility : IMod
         }
         if (_transitionPending)
         {
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                TetherLifecycle.Transition, TetherReason.None));
             _reconstructionStatus = "TRANSITION_READY";
             return;
         }
@@ -1132,6 +1280,24 @@ public sealed class CoopFeasibility : IMod
             if (_velocityX < 0) _facingLeft = true;
             else if (_velocityX > 0) _facingLeft = false;
 
+            int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
+            int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
+            TetherMovementIntent intent = HorizontalTetherIntent((_proxyX >> 16) - playerX, _velocityX);
+            TetherCommand tether = _tetherPolicy.Reduce(new TetherObservation(
+                (_proxyX >> 16) - playerX, (_proxyY >> 16) - playerY, intent,
+                TetherLifecycle.Active, _downed ? TetherReason.Downed : TetherReason.None));
+            if (tether.Movement == TetherMovementCommand.BlockOutward)
+            {
+                _velocityX = 0;
+                _horizontalCommandThisUpdate = false;
+                commandedLeft = commandedRight = false;
+            }
+            if (tether.BeginReconstruction)
+            {
+                BeginReconstruction("TETHER");
+                return;
+            }
+
             JumpForgivenessTransition jump = _jumpForgiveness.BeginUpdate(
                 (tapped & (ushort)GameButton.Cross) != 0, _grounded, _crouched);
             jumpContinuation = jump.Continuation;
@@ -1158,6 +1324,16 @@ public sealed class CoopFeasibility : IMod
             // The legacy path cleared before physics but still ran walk-off initialization after
             // grounded refresh, so advance an empty pre-physics phase to preserve that ordering.
             jumpContinuation = _jumpForgiveness.BeginUpdate(false, _grounded, _crouched).Continuation;
+            int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
+            int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
+            TetherCommand tether = _tetherPolicy.Reduce(new TetherObservation(
+                (_proxyX >> 16) - playerX, (_proxyY >> 16) - playerY, TetherMovementIntent.None,
+                TetherLifecycle.Active, _downed ? TetherReason.Downed : TetherReason.None));
+            if (tether.BeginReconstruction)
+            {
+                BeginReconstruction("TETHER");
+                return;
+            }
         }
 
         if (!_grounded) _velocityY = Math.Min(MaxFallSpeed, _velocityY + Gravity);
@@ -1214,14 +1390,7 @@ public sealed class CoopFeasibility : IMod
             _jumpPending = false;
         }
 
-        int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
-        int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
         ValidateManagedHealth();
-        if (Math.Abs((_proxyX >> 16) - playerX) > 256 || Math.Abs((_proxyY >> 16) - playerY) > 192)
-        {
-            BeginReconstruction("TETHER");
-            return;
-        }
 
         if (!_movementSession.SnapshotEligible) return;
         _lastManagedSnapshot = new ManagedProxySnapshot(_managedUpdateId, _roomEpochTracker.Epoch,
@@ -1241,6 +1410,9 @@ public sealed class CoopFeasibility : IMod
         _attackTimer = 0;
         _attackSpawnPending = false;
         CleanupOwnedAttack(memory, "COLLISION");
+        _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+            TetherLifecycle.Active, _collisionDisabled ? TetherReason.Collision :
+                TetherReason.UnsupportedTerrain));
         BeginReconstruction(_collisionDisabled ? "COLLISION" : "TERRAIN");
     }
 
@@ -1264,10 +1436,12 @@ public sealed class CoopFeasibility : IMod
         }
         int playerX = unchecked((int)memory.ReadU32(PlayerWorldXAddress));
         int playerY = unchecked((int)memory.ReadU32(PlayerWorldYAddress));
-        bool playerAlive = memory.ReadU32(PlayerEntityAddress + EntityUpdateOffset) != 0 &&
-            (memory.ReadU32(PlayerEntityAddress + EntityFlagsOffset) & EntityDead) == 0;
-        bool playerCompatible = Player.IsAlucard && Player.HasControl &&
-            !Player.HasStatus(PlayerStatus.Transform | PlayerStatus.Dead);
+        int playerHp = Player.Hp;
+        uint playerStatus = (uint)Player.Status;
+        ushort playerStep = (ushort)Player.Step;
+        bool playerAlive = PlayerOneLiveness.IsAlive(playerHp, playerStatus, playerStep);
+        bool playerCompatible = PlayerOneLiveness.IsCompatible(
+            playerHp, playerStatus, playerStep, Player.IsAlucard, Player.HasControl);
         var observation = new ManagedReviveObservation(canControl,
             (Game.Pressed & (ushort)GameButton.Down) != 0,
             (player2Pressed & (ushort)GameButton.Circle) != 0,
@@ -1291,6 +1465,21 @@ public sealed class CoopFeasibility : IMod
     private static int ApproachZero(int value, int amount) => value > 0
         ? Math.Max(0, value - amount)
         : Math.Min(0, value + amount);
+
+    private static TetherMovementIntent HorizontalTetherIntent(int deltaX, int velocityX)
+    {
+        if (velocityX == 0 || deltaX == 0) return TetherMovementIntent.None;
+        return (deltaX > 0) == (velocityX > 0)
+            ? TetherMovementIntent.Outward : TetherMovementIntent.Inward;
+    }
+
+    private TetherReason CurrentUnsafeTetherReason()
+    {
+        if (_fatal) return TetherReason.Fatal;
+        if (_collisionDisabled) return TetherReason.Collision;
+        if (_safeCode == "SHAPE") return TetherReason.UnsupportedTerrain;
+        return TetherReason.Lifecycle;
+    }
 
     private void ClearJumpForgiveness()
     {
@@ -1555,13 +1744,18 @@ public sealed class CoopFeasibility : IMod
         bool nativeBodyConfirmed = _nativeSpriteDrawnThisFrame;
         _nativeSpriteDrawnThisFrame = false;
 
-        if (!_enabled || !_safeFrame || !_proxyInitialized || !_animationStateValid || _transitionPending ||
-            !Game.Available || !Game.InGame || Game.IsLoading || Game.MenuOpen || Game.MapOpen || !DisplayModeHooks.IsStage)
+        bool statusEligible = CoopStatusRenderPolicy.Eligible(_enabled, Game.Available, Game.InGame,
+            Game.IsLoading, Game.MenuOpen, Game.MapOpen, DisplayModeHooks.IsStage);
+        if (!statusEligible)
             return;
-        _renderEligible++;
 
         var gpu = RecompOne.Runtime.Runtime.Gpu;
-        if (gpu == null) return;
+        bool statusSubmitted = gpu != null && DrawCoopStatus(gpu, memory, currentBuffer);
+        _tetherPolicy.RecordStatus(statusSubmitted);
+        if (!CoopStatusRenderPolicy.AvatarEligible(statusEligible, _safeFrame, _proxyInitialized,
+                _animationStateValid, _transitionPending) || gpu == null)
+            return;
+        _renderEligible++;
 
         bool avatarSubmitted = nativeBodyConfirmed && TryDrawIndependentSprite(gpu, memory, currentBuffer);
         if (!avatarSubmitted)
@@ -1592,6 +1786,33 @@ public sealed class CoopFeasibility : IMod
         if (avatarSubmitted) _renderSubmitted++;
         DrawProjectileMarker(gpu, memory, currentBuffer);
         DrawCombatHud(gpu, memory, currentBuffer);
+    }
+
+    private bool DrawCoopStatus(RecompOne.Runtime.Gpu gpu, IMemory memory, uint currentBuffer)
+    {
+        if (!WriteStageDrawEnvironment(gpu, memory, currentBuffer)) return false;
+        int x = unchecked((int)memory.ReadU32(BackbufferXAddress)) + 8;
+        int y = unchecked((int)memory.ReadU32(BackbufferYAddress)) + 27;
+        TetherDiagnostics status = _tetherPolicy.Diagnostics;
+        byte r, g, b;
+        int width, height;
+        if (_downed || status.Reason == TetherReason.Downed)
+            (r, g, b, width, height) = (byte.MaxValue, (byte)48, (byte)64, 10, 3);
+        else if (status.Phase == TetherPhase.Warning)
+            (r, g, b, width, height) = (byte.MaxValue, (byte)224, (byte)48, 6, 3);
+        else if (status.Phase == TetherPhase.Resistance)
+            (r, g, b, width, height) = (byte.MaxValue, (byte)128, (byte)32, 8, 4);
+        else if (status.Phase == TetherPhase.Reconstructing)
+            (r, g, b, width, height) = ((byte)64, (byte)144, byte.MaxValue, 10, 4);
+        else if (status.Phase == TetherPhase.Suspended)
+            (r, g, b, width, height) = ((byte)224, (byte)64, byte.MaxValue, 4, 5);
+        else
+            (r, g, b, width, height) = ((byte)48, (byte)208, (byte)224, 4, 3);
+        DrawGpuTile(gpu, x - 1, y - 1, 12, 7, 0, 0, 0);
+        DrawGpuTile(gpu, x, y, width, height, r, g, b);
+        if (status.Phase == TetherPhase.Resistance)
+            DrawGpuTile(gpu, x + 9, y, 1, 4, r, g, b);
+        return true;
     }
 
     private void DrawProjectileMarker(RecompOne.Runtime.Gpu gpu, IMemory memory, uint currentBuffer)
@@ -2045,6 +2266,7 @@ public sealed class CoopFeasibility : IMod
         int nearestP1Distance = 0;
         int nearestP2Distance = 0;
         bool nearestCompatible = false;
+        int compatibleCurrent = 0;
         int p1X = ReadRamS16(ram, PlayerEntityAddress + 0x02) + shape.WidescreenShift;
         int p1Y = ReadRamS16(ram, PlayerEntityAddress + 0x06);
         ushort compatibleState = _attackProfileLatched ? _latchedAttackProfile.HitState : (ushort)2;
@@ -2074,7 +2296,11 @@ public sealed class CoopFeasibility : IMod
             if (IsNativeTargetBody(state))
             {
                 _enemyNativeCandidateSamples++;
-                if ((state & compatibleState) != 0) _enemyCompatibleCandidateSamples++;
+                if ((state & compatibleState) != 0)
+                {
+                    _enemyCompatibleCandidateSamples++;
+                    compatibleCurrent++;
+                }
                 long p2Dx = centerX - shape.CenterX;
                 long p2Dy = centerY - shape.CenterY;
                 long p2Squared = p2Dx * p2Dx + p2Dy * p2Dy;
@@ -2120,6 +2346,7 @@ public sealed class CoopFeasibility : IMod
         _nearestTargetP1Distance = nearestP1Distance;
         _nearestTargetP2Distance = nearestP2Distance;
         _nearestTargetCompatible = nearestCompatible;
+        _compatibleTargetCurrent = compatibleCurrent;
         _enemyDiagnosticStatus = nearestSlot >= 0 ? "TARGET" : "EMPTY";
 
         return new ContactScanResult(eligible, overlaps, damaging, current, lastSlot, lastEntityId);
@@ -2167,6 +2394,7 @@ public sealed class CoopFeasibility : IMod
         _nearestTargetHp = 0;
         _nearestTargetP1Distance = _nearestTargetP2Distance = 0;
         _nearestTargetCompatible = false;
+        _compatibleTargetCurrent = 0;
         _enemyDiagnosticStatus = status == "WAIT" ? "WAIT" : status;
         _contactStatus = status;
     }
@@ -2594,12 +2822,35 @@ public sealed class CoopFeasibility : IMod
         SuspendContactScan("RECON");
         _movementSession.BeginRecovery(reason == "TETHER"
             ? ManagedMovementRecoveryKind.Tether : ManagedMovementRecoveryKind.Collision);
+        _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+        _reconstructionTriggerReason = reason switch
+        {
+            "TERRAIN" => TetherReason.UnsupportedTerrain,
+            "TETHER" => TetherReason.HardBoundary,
+            _ => TetherReason.Reconstruction,
+        };
         _locomotionState.Invalidate();
         _attackTimer = 0;
         _attackSpawnPending = false;
         _velocityX = _velocityY = 0;
         _reconstructionStatus = reason;
         ClearJumpForgiveness();
+    }
+
+    private void ArmReconstructionRetry()
+    {
+        TetherReason reason = _collisionQueryFailed
+            ? TetherReason.UnsupportedTerrain : _reconstructionTriggerReason;
+        if (_collisionDisabled)
+            _reconstructionRetry = ReconstructionRetryPolicy.TerminalFault(
+                _reconstructionRetry, TetherReason.Collision);
+        else
+            _reconstructionRetry = ReconstructionRetryPolicy.RetryableFault(
+                _reconstructionRetry, reason);
+        _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+            TetherLifecycle.Active, _reconstructionRetry.Reason));
+        _reconstructionStatus = _collisionDisabled
+            ? "COLLISION:TERMINAL" : $"SUSPENDED:RETRY-{_reconstructionRetry.CooldownRemaining}";
     }
 
     private static int AnimationFrameCount(ManagedAnimation animation) =>
@@ -2773,6 +3024,27 @@ public sealed class CoopFeasibility : IMod
         _minimumFreeAttack = Math.Min(_minimumFreeAttack, _freeAttackCurrent);
         _minimumLongestAttack = Math.Min(_minimumLongestAttack, _longestAttackCurrent);
         _slotSamples++;
+        CensusOwnedAttackMarkers(memory);
+    }
+
+    private void CensusOwnedAttackMarkers(IMemory memory)
+    {
+        Span<AttackMarkerObservation> observations = stackalloc AttackMarkerObservation[AttackSlotEnd - AttackSlotStart];
+        int index = 0;
+        for (int slot = AttackSlotStart; slot < AttackSlotEnd; slot++)
+        {
+            uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
+            bool marked = memory.ReadU32(entity + 0x7C) == AttackMarker;
+            uint generation = memory.ReadU32(entity + 0x80);
+            uint roomHash = memory.ReadU32(entity + 0x84);
+            observations[index++] = new(slot, marked, generation, roomHash);
+        }
+        AttackMarkerProjection projection = AttackMarkerCensus.Project(observations,
+            _ownedAttackSlot, _ownedAttackGeneration, _ownedAttackRoomHash,
+            _attackQuarantineSlot, _attackQuarantineGeneration, _attackQuarantineRoomHash);
+        _attackMarkerCount = projection.Markers;
+        _attackOrphanMarkerCount = projection.Orphans;
+        if (projection.Orphans != 0 && !_attackHardFailure) MarkAttackHardFailure("ORPHAN-MARKER");
     }
 
     private bool TryExtractAttackProfile(CpuContext context, IMemory memory, AttackKind kind,
@@ -2957,7 +3229,10 @@ public sealed class CoopFeasibility : IMod
             _attackArmUpdateGeneration = _updateCalls;
             _attackObservedMainGeneration = -1;
             _attackAllocations++;
+            if (profile.Kind == AttackKind.Projectile) _attackProjectileAllocations++;
+            else _attackContactAllocations++;
             _attackStatus = "ARMED";
+            CensusOwnedAttackMarkers(memory);
         }
         else
         {
@@ -2975,6 +3250,7 @@ public sealed class CoopFeasibility : IMod
             else
                 StopResidualAttackMutation(failed, "PUBLICATION");
             _attackStatus = $"FAIL:{_attackStatus}";
+            CensusOwnedAttackMarkers(memory);
         }
     }
 
@@ -3005,6 +3281,7 @@ public sealed class CoopFeasibility : IMod
         if (!owned)
         {
             StopQuarantinedMutation(request, "OWNERSHIP-MISMATCH");
+            CensusOwnedAttackMarkers(memory);
             return false;
         }
         AttackLeaseCommand authorization = AttackLeaseMachine.OwnedExact(_attackLease, request);
@@ -3030,6 +3307,11 @@ public sealed class CoopFeasibility : IMod
             timingValid = _updateCalls == _attackArmUpdateGeneration + 1 &&
                 _attackWindowObserved && _attackObservedMainGeneration == _attackArmMainGeneration + 1;
             if (timingValid) _attackNormalEngineWindows++;
+            if (timingValid && _attackProfileLatched)
+            {
+                if (_latchedAttackProfile.Kind == AttackKind.Projectile) _attackProjectileNormalWindows++;
+                else _attackContactWindows++;
+            }
             else
             {
                 _attackTimingFailures++;
@@ -3054,12 +3336,14 @@ public sealed class CoopFeasibility : IMod
         if (!AttackPublicationPolicy.Cleanup(ref _attackPublication, _attackPublicationAdapter))
         {
             ReconcileRejectedAttackOperation(request, "DEACTIVATE-REJECTED");
+            CensusOwnedAttackMarkers(memory);
             return false;
         }
         if (reason != "WINDOW" && reason != "BUILD_FAIL") _attackLifecycleCancellations++;
         _attackCleanups++;
         _attackStatus = CleanupStatus(reason);
         ClearOwnedAttackMetadata(authorization);
+        CensusOwnedAttackMarkers(memory);
         return true;
     }
 
@@ -3086,6 +3370,7 @@ public sealed class CoopFeasibility : IMod
         {
             AttackLeaseCommand probe = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
             ReconcileRejectedAttackOperation(probe, "REPUBLISH-REJECTED");
+            CensusOwnedAttackMarkers(memory);
             return false;
         }
         _attackWindowObserved = false;
@@ -3107,6 +3392,7 @@ public sealed class CoopFeasibility : IMod
             {
                 CleanupOwnedAttack(memory, reason);
                 TryCleanupQuarantinedAttack(memory, reason);
+                CensusOwnedAttackMarkers(memory);
             }
             catch (Exception ex)
             {
@@ -3157,12 +3443,14 @@ public sealed class CoopFeasibility : IMod
     private void StopQuarantinedMutation(AttackLeaseCommand probe, string status)
     {
         _attackLease = AttackLeaseMachine.ProbeReused(_attackLease, probe);
+        _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(_exactOwnedAttackLifetime, false);
         MarkAttackHardFailure($"QUARANTINE-REUSED:{status}:{probe.Lease.Slot}");
     }
 
     private void StopResidualAttackMutation(AttackLeaseCommand probe, string status)
     {
         _attackLease = AttackLeaseMachine.TerminalFault(_attackLease, probe);
+        _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(_exactOwnedAttackLifetime, false);
         MarkAttackHardFailure($"RESIDUAL-STOP:{status}:{probe.Lease.Slot}");
     }
 
@@ -3186,6 +3474,7 @@ public sealed class CoopFeasibility : IMod
     {
         _attackLease = AttackLeaseMachine.ClearSucceeded(_attackLease, authorization);
         _attackPublication = AttackPublicationPolicy.Initial();
+        _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(_exactOwnedAttackLifetime, false);
         _attackTargets.Clear();
         _attackWindowObserved = false;
     }
@@ -3210,19 +3499,23 @@ public sealed class CoopFeasibility : IMod
                 _attackLease = AttackLeaseMachine.ClearSucceeded(_attackLease, authorization);
             }
             else _attackLease = AttackLeaseMachine.RetryFree(_attackLease, request);
+            _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(_exactOwnedAttackLifetime, false);
             _attackTargets.Clear();
             _attackWindowObserved = false;
+            CensusOwnedAttackMarkers(memory);
             return true;
         }
         if (_attackPublication.Phase == AttackPublicationPhase.RetryableQuarantine)
         {
             MarkAttackHardFailure("CLEANUP-PENDING:RETRY");
+            CensusOwnedAttackMarkers(memory);
             return false;
         }
         if (_attackPublication.Phase == AttackPublicationPhase.MutationStopped)
             StopQuarantinedMutation(request, "RETRY-REUSED");
         else
             StopResidualAttackMutation(request, "RETRY-FAULT");
+        CensusOwnedAttackMarkers(memory);
         return false;
     }
 
@@ -3249,9 +3542,60 @@ public sealed class CoopFeasibility : IMod
         _attackTargetHpChanges += result.HpChanges;
         _attackCooldownObservations += result.CooldownChanges;
         _nativeTargetHits += result.NativeHits;
+        if (_attackProfileLatched && _latchedAttackProfile.Kind == AttackKind.Projectile)
+            _attackProjectileNativeHits += result.NativeHits;
+        else
+            _attackContactNativeHits += result.NativeHits;
         _defeatedTargets += result.Defeated;
         _compatibleZeroHpHits += result.CompatibleZeroHpHits;
         _attackCausalResults += result.CausalResults;
+        if (result.CaptureOverflowed)
+        {
+            _attackTargetOverflowEvents++;
+            if (_dropWindowOpen)
+                _dropTracker.RecordAmbiguousOverflowWindow(_movementSession.RoomEpoch);
+        }
+        if (result.UniqueDefeat && _dropWindowOpen)
+            _dropTracker.RecordUniqueCausalDefeat(_movementSession.RoomEpoch,
+                result.DefeatWorldX, result.DefeatWorldY);
+    }
+
+    private void BeginDropObservation(IMemory memory)
+    {
+        if (_dropWindowOpen) { _dropTracker.Cancel(); _dropWindowOpen = false; }
+        if (!Game.Available || !Game.InGame || Game.IsLoading ||
+            memory.ReadU8(Game.StageIdAddr) != (byte)Stage.MarbleGallery) return;
+        _dropTracker.BeginWindow(_movementSession.RoomEpoch, null);
+        _dropWindowOpen = true;
+        ScanDropSlots(memory, before: true);
+    }
+
+    private void CompleteDropObservation(IMemory memory)
+    {
+        if (!_dropWindowOpen) return;
+        ScanDropSlots(memory, before: false);
+        _dropTracker.CompleteWindow(null); // Native EXP has no validated read contract yet.
+        _dropWindowOpen = false;
+        if (_dropTracker.Diagnostics.Faulted)
+            throw new InvalidOperationException("bounded native drop tracker faulted");
+    }
+
+    private void ScanDropSlots(IMemory memory, bool before)
+    {
+        int scrollX = unchecked((int)memory.ReadU32(ScrollXAddress)) >> 16;
+        int scrollY = unchecked((int)memory.ReadU32(ScrollYAddress)) >> 16;
+        for (int slot = NativeDropObservationTracker.FirstSlot;
+             slot < NativeDropObservationTracker.FirstSlot + NativeDropObservationTracker.SlotCount; slot++)
+        {
+            uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
+            var observation = new NativeDropSlotObservation(memory.ReadU16(entity + EntityIdOffset),
+                memory.ReadU32(entity + EntityUpdateOffset), memory.ReadU16(entity + 0x7E),
+                memory.ReadU8(entity + 0x24), memory.ReadU8(entity + 0x48),
+                unchecked((short)(unchecked((short)memory.ReadU16(entity + 0x02)) + scrollX)),
+                unchecked((short)(unchecked((short)memory.ReadU16(entity + 0x06)) + scrollY)));
+            if (before) _dropTracker.SetBefore(slot, observation);
+            else _dropTracker.SetAfter(slot, observation);
+        }
     }
 
     private void ObserveOwnedAttackWindow(IMemory memory)
@@ -3267,6 +3611,7 @@ public sealed class CoopFeasibility : IMod
                 _mainEngineCalls))
             {
                 ReconcileRejectedAttackOperation(probe, "OBSERVE-REJECTED");
+                CensusOwnedAttackMarkers(memory);
                 return;
             }
         }
@@ -3277,6 +3622,20 @@ public sealed class CoopFeasibility : IMod
             CleanupOwnedAttack(memory, "OBSERVE_FAIL");
             TryCleanupQuarantinedAttack(memory, "OBSERVE_FAIL");
         }
+    }
+
+    private void UpdateExactOwnedAttackLifetime(IMemory memory)
+    {
+        bool exact = false;
+        if (_ownedAttackSlot >= 0)
+        {
+            uint entity = Game.EntitiesAddr + (uint)(_ownedAttackSlot * Entity.Stride);
+            exact = memory.ReadU32(entity + 0x7C) == AttackMarker &&
+                memory.ReadU32(entity + 0x80) == _ownedAttackGeneration &&
+                memory.ReadU32(entity + 0x84) == _ownedAttackRoomHash;
+        }
+        _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(
+            _exactOwnedAttackLifetime, exact);
     }
 
     private static int CountFree(IMemory memory, int start, int end, out int longestRun)
@@ -3389,6 +3748,11 @@ public sealed class CoopFeasibility : IMod
         _nativeSpriteFlipSeenInStreak = false;
         _nativeSpriteStatus = "WAIT";
         _hudEligible = _hudSubmitted = 0;
+        _tetherPolicy.ResetDiagnostics();
+        _reconstructionRetry = ReconstructionRetryPolicy.ResetDiagnostics();
+        _reconstructionTriggerReason = TetherReason.Reconstruction;
+        _dropTracker.ResetDiagnostics();
+        _dropWindowOpen = false;
         Array.Clear(_contactObservations);
         _contactOpportunities.Reset();
         _contactDisabled = false;
@@ -3402,7 +3766,9 @@ public sealed class CoopFeasibility : IMod
         _attackTimer = 0;
         _attackSpawnPending = false;
         if (!cleanupQuarantined) _outgoingAttackDisabled = _attackHardFailure = false;
-        _attackAllocations = _attackNormalEngineWindows = _attackCleanups = 0;
+        _attackAllocations = _attackContactAllocations = _attackProjectileAllocations = 0;
+        _attackNormalEngineWindows = _attackContactWindows = _attackProjectileNormalWindows = 0;
+        _attackCleanups = 0;
         _attackLifecycleCancellations = 0;
         _attackFailures = cleanupQuarantined ? 1 : 0;
         _attackLastAttackerId = _attackHitFlagObservations = _attackCooldownObservations = 0;
@@ -3418,9 +3784,14 @@ public sealed class CoopFeasibility : IMod
         _latchedAttackProfile = default;
         _projectileX = _projectileY = _projectileOriginX = _projectileLifetime = 0;
         _projectileWindows = 0;
+        _attackContactNativeHits = _attackProjectileNativeHits = 0;
+        _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Reset();
+        _attackMarkerCount = _attackOrphanMarkerCount = 0;
         _profileExtractions = _profileExtractionFailures = 0;
         _equipmentRestoreChecks = _equipmentRestoreFailures = 0;
         _enemyDiagnosticScans = _enemyNativeCandidateSamples = _enemyCompatibleCandidateSamples = 0;
+        _compatibleTargetCurrent = 0;
+        _attackTargetOverflowEvents = 0;
         _nearestTargetSlot = -1;
         _nearestTargetEntityId = _nearestTargetEnemyId = 0;
         _nearestTargetHp = 0;
@@ -3467,9 +3838,16 @@ public sealed class CoopFeasibility : IMod
         if (_fatal) return;
         _firstError = $"{subsystem}: {ex.GetType().Name}: {ex.Message}";
         _fatal = true;
-        _enabled = false;
         _safeFrame = false;
+        try
+        {
+            _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
+                TetherLifecycle.Fatal, TetherReason.Fatal));
+        }
+        catch { /* Preserve the original circuit-breaker evidence on diagnostic exhaustion. */ }
         _movementSession.Fatal();
+        _reconstructionRetry = ReconstructionRetryPolicy.TerminalFault(
+            _reconstructionRetry, TetherReason.Fatal);
         _locomotionState.Invalidate();
         DisarmAwareness("FATAL");
         _attackSpawnPending = false;
@@ -3477,6 +3855,8 @@ public sealed class CoopFeasibility : IMod
         CancelAutomaticTest("diagnostic circuit breaker");
         ClearJumpForgiveness();
         SuspendContactScan("FATAL");
+        _dropTracker.Cancel();
+        _dropWindowOpen = false;
         // Cleanup is deliberately non-throwing and cannot replace the original latched error.
         CancelOwnedAttack("FATAL");
         ClearLatchedAttackProfile();
@@ -3667,6 +4047,7 @@ public sealed class CoopFeasibility : IMod
         CancelAutomaticTest("input mode changed");
         ReleaseVirtualKeys();
         _virtualKeyboard = enabled;
+        VirtualKeyboardPreference.Persist(new RuntimePreferenceStore(), enabled);
         _physicalControllerTest = false;
         _previousConnected = Controller.Connected2;
         ClearInputObservations();
