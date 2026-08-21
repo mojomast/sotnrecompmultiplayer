@@ -13,34 +13,45 @@ public enum NativeLoadBootstrapPhase : byte
 
 public sealed class NativeLoadBootstrapState
 {
+    // This exceeds the observed 28-frame stale-identity interval after file-select reconstruction.
+    public const int RequiredQuietSettleSamples = 60;
+    public const int RequiredQualifyingSamples = 2;
+
     public NativeLoadBootstrapPhase Phase { get; private set; }
     public bool Armed => Phase != NativeLoadBootstrapPhase.Closed;
     public int ConsecutiveQualifyingSamples { get; private set; }
+    public int ConsecutiveQuietSamples { get; private set; }
     public bool Stable => ConsecutiveQualifyingSamples >= RequiredQualifyingSamples;
-    public const int RequiredQualifyingSamples = 2;
-    private bool _preLoadRoomKnown;
-    private ManagedRoomKey _preLoadRoom;
+    private bool _provisionalRoomKnown;
+    private bool _identityChanged;
+    private ManagedRoomKey _provisionalRoom;
 
     public void Arm()
     {
-        _preLoadRoomKnown = false;
+        _provisionalRoomKnown = false;
+        _identityChanged = false;
         ConsecutiveQualifyingSamples = 0;
-        Phase = NativeLoadBootstrapPhase.Armed;
-    }
-
-    public void Arm(ManagedRoomKey preLoadRoom)
-    {
-        _preLoadRoom = preLoadRoom;
-        _preLoadRoomKnown = true;
-        ConsecutiveQualifyingSamples = 0;
+        ConsecutiveQuietSamples = 0;
         Phase = NativeLoadBootstrapPhase.Armed;
     }
 
     // Returns true when consecutive post-update samples make baseline and reconstruction eligible.
-    public bool ObserveQualifyingPostUpdate()
+    public bool ObserveQualifyingPostUpdate(ManagedRoomKey observedRoom)
     {
         if (!Armed) return false;
         if (ConsecutiveQualifyingSamples < RequiredQualifyingSamples) ConsecutiveQualifyingSamples++;
+        if (Phase == NativeLoadBootstrapPhase.ProvisionalSelected)
+        {
+            if (!_provisionalRoom.SameRoomAs(observedRoom))
+            {
+                ConsecutiveQuietSamples = 0;
+                _identityChanged = true;
+            }
+            else if (!_identityChanged && ConsecutiveQuietSamples < RequiredQuietSettleSamples)
+            {
+                ConsecutiveQuietSamples++;
+            }
+        }
         return Phase == NativeLoadBootstrapPhase.Armed && Stable;
     }
 
@@ -48,9 +59,14 @@ public sealed class NativeLoadBootstrapState
     {
         if (!Armed) return;
         ConsecutiveQualifyingSamples = 0;
-        if (Phase is NativeLoadBootstrapPhase.BaselineObserved or
-            NativeLoadBootstrapPhase.ProvisionalSelected)
+        ConsecutiveQuietSamples = 0;
+        if (Phase == NativeLoadBootstrapPhase.BaselineObserved)
             Phase = NativeLoadBootstrapPhase.Armed;
+    }
+
+    public void ObserveLayer()
+    {
+        if (Armed) ConsecutiveQuietSamples = 0;
     }
 
     // True exactly once per load, when a fully-gated post-update room becomes the
@@ -68,29 +84,48 @@ public sealed class NativeLoadBootstrapState
         if (!Armed || !Stable) return false;
         if (result != ManagedMovementReconstructionResult.Selected)
         {
+            ConsecutiveQuietSamples = 0;
             Phase = NativeLoadBootstrapPhase.Suspended;
             return false;
         }
-        if (_preLoadRoomKnown && _preLoadRoom.SameRoomAs(reconstructedRoom))
+        if (!_provisionalRoomKnown)
+        {
+            _provisionalRoom = reconstructedRoom;
+            _provisionalRoomKnown = true;
+            _identityChanged = false;
+            ConsecutiveQuietSamples = 0;
+            Phase = NativeLoadBootstrapPhase.ProvisionalSelected;
+            return false;
+        }
+        if (_provisionalRoom.SameRoomAs(reconstructedRoom))
         {
             Phase = NativeLoadBootstrapPhase.ProvisionalSelected;
             return false;
         }
-        Phase = NativeLoadBootstrapPhase.Closed;
-        _preLoadRoomKnown = false;
-        ConsecutiveQualifyingSamples = 0;
-        return true;
+        return CloseCore();
     }
 
-    public bool CompleteReconstruction(ManagedMovementReconstructionResult result) =>
-        CompleteReconstruction(result, default);
+    public bool CompleteQuietSettle()
+    {
+        if (Phase != NativeLoadBootstrapPhase.ProvisionalSelected || _identityChanged ||
+            ConsecutiveQuietSamples < RequiredQuietSettleSamples)
+            return false;
+        return CloseCore();
+    }
+
+    private bool CloseCore()
+    {
+        Phase = NativeLoadBootstrapPhase.Closed;
+        _provisionalRoomKnown = false;
+        _identityChanged = false;
+        ConsecutiveQualifyingSamples = 0;
+        ConsecutiveQuietSamples = 0;
+        return true;
+    }
 
     public bool Close()
     {
         if (!Armed) return false;
-        _preLoadRoomKnown = false;
-        ConsecutiveQualifyingSamples = 0;
-        Phase = NativeLoadBootstrapPhase.Closed;
-        return true;
+        return CloseCore();
     }
 }

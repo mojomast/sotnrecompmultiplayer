@@ -293,12 +293,12 @@ var tests = new List<(string Name, Action Run)>
         var bootstrap = new NativeLoadBootstrapState();
         bootstrap.Arm();
         True(bootstrap.Armed);
-        False(bootstrap.ObserveQualifyingPostUpdate());
+        False(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
         False(bootstrap.ConsumeSafeBaseline());
         Equal(NativeLoadBootstrapPhase.Armed, bootstrap.Phase);
         Equal(1, bootstrap.ConsecutiveQualifyingSamples);
         False(bootstrap.Stable);
-        True(bootstrap.ObserveQualifyingPostUpdate());
+        True(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
         True(bootstrap.ConsumeSafeBaseline());
         False(bootstrap.ConsumeSafeBaseline());
         Equal(NativeLoadBootstrapPhase.BaselineObserved, bootstrap.Phase);
@@ -309,54 +309,99 @@ var tests = new List<(string Name, Action Run)>
     {
         var bootstrap = new NativeLoadBootstrapState();
         bootstrap.Arm();
-        False(bootstrap.ObserveQualifyingPostUpdate());
+        False(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
         bootstrap.ConsumeSafeBaseline();
         bootstrap.ObserveNonQualifyingPostUpdate();
         Equal(0, bootstrap.ConsecutiveQualifyingSamples);
         Equal(NativeLoadBootstrapPhase.Armed, bootstrap.Phase);
-        False(bootstrap.ObserveQualifyingPostUpdate());
+        False(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
         False(bootstrap.Stable);
-        True(bootstrap.ObserveQualifyingPostUpdate());
+        True(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
         True(bootstrap.Stable);
     }),
     ("native load bootstrap remains armed across failed reconstruction", () =>
     {
         var bootstrap = new NativeLoadBootstrapState();
         bootstrap.Arm();
-        bootstrap.ObserveQualifyingPostUpdate();
+        bootstrap.ObserveQualifyingPostUpdate(Room(44));
         bootstrap.ConsumeSafeBaseline();
-        False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected));
-        bootstrap.ObserveQualifyingPostUpdate();
-        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.NoSafeCandidate);
+        False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(44)));
+        bootstrap.ObserveQualifyingPostUpdate(Room(44));
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.NoSafeCandidate, Room(44));
         Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
         True(bootstrap.Armed);
-        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.AdapterFault);
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.AdapterFault, Room(44));
         Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
     }),
-    ("native load bootstrap keeps retained room reconstruction provisional", () =>
+    ("file-select stale identity remains provisional through exact layer timing", () =>
     {
         var bootstrap = new NativeLoadBootstrapState();
-        bootstrap.Arm(Room(44));
-        bootstrap.ObserveQualifyingPostUpdate();
-        bootstrap.ObserveQualifyingPostUpdate();
-        bootstrap.ConsumeSafeBaseline();
+        ManagedMovementSessionReducer session = Active(Room(44));
+        bootstrap.Arm();
+
+        False(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
+        session.ObserveSafeRoom(Room(44));
+        True(bootstrap.ObserveQualifyingPostUpdate(Room(44)));
+        True(bootstrap.ConsumeSafeBaseline());
+        session.ObserveSafeRoom(Room(44));
         False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(44)));
         Equal(NativeLoadBootstrapPhase.ProvisionalSelected, bootstrap.Phase);
         True(bootstrap.Armed);
+
+        for (int frame = 0; frame < 28; frame++)
+        {
+            bootstrap.ObserveQualifyingPostUpdate(Room(44));
+            session.ObserveSafeRoom(Room(44));
+        }
+        Equal(28, bootstrap.ConsecutiveQuietSamples);
+        bootstrap.ObserveLayer();
+        Equal(0, bootstrap.ConsecutiveQuietSamples);
+        Equal(0, session.State.RoomLayerEvents);
+
+        bootstrap.ObserveQualifyingPostUpdate(Room(140));
+        Equal(0, bootstrap.ConsecutiveQuietSamples);
+        session.RebaselineRoom(Room(140));
+        ManagedMovementSessionTransition destination = default;
+        while (!destination.ReconstructionRequested)
+        {
+            bootstrap.ObserveQualifyingPostUpdate(Room(140));
+            destination = session.ObserveSafeRoom(Room(140));
+        }
+        session.CompleteReconstruction(destination.Reconstruction,
+            ManagedMovementReconstructionResult.Selected);
         True(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(140)));
+        False(bootstrap.Armed);
+        False(session.State.TransitionPending || session.State.AwaitingPostTransitionMovement);
+        Equal(0, session.State.RoomLayerEvents);
+        Equal(0, session.State.CompletedTransitions);
+    }),
+    ("same-identity native load closes only after 60 quiet samples", () =>
+    {
+        NativeLoadBootstrapState bootstrap = ProvisionalBootstrap(Room(44));
+        for (int sample = 1; sample < NativeLoadBootstrapState.RequiredQuietSettleSamples; sample++)
+        {
+            bootstrap.ObserveQualifyingPostUpdate(Room(44));
+            False(bootstrap.CompleteQuietSettle());
+        }
+        bootstrap.ObserveQualifyingPostUpdate(Room(44));
+        Equal(NativeLoadBootstrapState.RequiredQuietSettleSamples,
+            bootstrap.ConsecutiveQuietSamples);
+        True(bootstrap.CompleteQuietSettle());
         False(bootstrap.Armed);
     }),
-    ("SaveLoaded bootstrap closes after stable reconstruction", () =>
+    ("native load layer resets the quiet-settle window", () =>
     {
-        var bootstrap = new NativeLoadBootstrapState();
-        bootstrap.Arm();
-        bootstrap.ObserveQualifyingPostUpdate();
-        bootstrap.ConsumeSafeBaseline();
-        bootstrap.ObserveQualifyingPostUpdate();
-        True(bootstrap.Stable);
-        True(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(140)));
-        Equal(NativeLoadBootstrapPhase.Closed, bootstrap.Phase);
-        False(bootstrap.Armed);
+        NativeLoadBootstrapState bootstrap = ProvisionalBootstrap(Room(44));
+        for (int sample = 0; sample < 40; sample++)
+            bootstrap.ObserveQualifyingPostUpdate(Room(44));
+        Equal(40, bootstrap.ConsecutiveQuietSamples);
+        bootstrap.ObserveLayer();
+        Equal(0, bootstrap.ConsecutiveQuietSamples);
+        for (int sample = 1; sample < NativeLoadBootstrapState.RequiredQuietSettleSamples; sample++)
+            bootstrap.ObserveQualifyingPostUpdate(Room(44));
+        False(bootstrap.CompleteQuietSettle());
+        bootstrap.ObserveQualifyingPostUpdate(Room(44));
+        True(bootstrap.CompleteQuietSettle());
     }),
     ("native load baseline does not create a reducer transition", () =>
     {
@@ -388,10 +433,13 @@ var tests = new List<(string Name, Action Run)>
     {
         var bootstrap = new NativeLoadBootstrapState();
         bootstrap.Arm();
-        bootstrap.ObserveQualifyingPostUpdate();
+        bootstrap.ObserveQualifyingPostUpdate(Room(140));
         bootstrap.ConsumeSafeBaseline();
-        bootstrap.ObserveQualifyingPostUpdate();
-        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected);
+        bootstrap.ObserveQualifyingPostUpdate(Room(140));
+        bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(140));
+        for (int sample = 0; sample < NativeLoadBootstrapState.RequiredQuietSettleSamples; sample++)
+            bootstrap.ObserveQualifyingPostUpdate(Room(140));
+        bootstrap.CompleteQuietSettle();
         False(bootstrap.Armed);
 
         ManagedMovementSessionReducer session = Active(Room(140));
@@ -588,13 +636,13 @@ var tests = new List<(string Name, Action Run)>
         trace.Record(MovementTransitionTrace.Capacity, MovementTransitionTrace.Capacity,
             MovementTransitionTraceSource.Reconstruction, session.State,
             Room((byte)(MovementTransitionTrace.Capacity + 1)),
-            "Selected:bootstrap-closed-post-load-identity", "cleared",
+            "Selected:bootstrap-closed-changed-identity", "cleared",
             NativeLoadBootstrapPhase.Closed);
 
         MovementTransitionTraceEntry[] entries = trace.Snapshot();
         Equal(MovementTransitionTrace.Capacity, entries.Length);
         Equal(MovementTransitionTraceSource.Reconstruction, entries[^1].EventSource);
-        Equal("Selected:bootstrap-closed-post-load-identity", entries[^1].Reconstruction);
+        Equal("Selected:bootstrap-closed-changed-identity", entries[^1].Reconstruction);
         Equal(NativeLoadBootstrapPhase.Closed, entries[^1].BootstrapPhase);
         False(entries[^1].TransitionPending);
         Equal((byte)(MovementTransitionTrace.Capacity + 1), entries[^1].Current.Room);
@@ -875,6 +923,17 @@ static ManagedMovementSessionReducer Active(ManagedRoomKey room)
     ManagedMovementSessionTransition reconstruction = Trigger(session, room);
     session.CompleteReconstruction(reconstruction.Reconstruction, ManagedMovementReconstructionResult.Selected);
     return session;
+}
+
+static NativeLoadBootstrapState ProvisionalBootstrap(ManagedRoomKey room)
+{
+    var bootstrap = new NativeLoadBootstrapState();
+    bootstrap.Arm();
+    bootstrap.ObserveQualifyingPostUpdate(room);
+    bootstrap.ObserveQualifyingPostUpdate(room);
+    bootstrap.ConsumeSafeBaseline();
+    False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, room));
+    return bootstrap;
 }
 
 static ManagedMovementSessionTransition Trigger(ManagedMovementSessionReducer session, ManagedRoomKey room)

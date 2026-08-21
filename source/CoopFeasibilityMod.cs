@@ -988,11 +988,7 @@ public sealed class CoopFeasibility : IMod
     private void ArmNativeLoadBootstrap(MovementTransitionTraceSource source, string detail)
     {
         if (!_nativeLoadBootstrap.Armed)
-        {
-            ManagedMovementSessionState beforeLoad = _movementSession.State;
-            if (beforeLoad.RoomKnown) _nativeLoadBootstrap.Arm(beforeLoad.Room);
-            else _nativeLoadBootstrap.Arm();
-        }
+            _nativeLoadBootstrap.Arm();
         _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
         _reconstructionTriggerReason = TetherReason.Reconstruction;
         TraceTransition(source, default, detail, "none");
@@ -1006,6 +1002,7 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             if (_nativeLoadBootstrap.Armed)
             {
+                _nativeLoadBootstrap.ObserveLayer();
                 _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
                     TetherLifecycle.Inactive, TetherReason.Reconstruction));
                 _locomotionState.Invalidate();
@@ -1241,11 +1238,20 @@ public sealed class CoopFeasibility : IMod
 
         RoomIdentity observedRoom = ReadRoomIdentity(memory);
         bool bootstrapSample = IsNativeLoadQualifyingPostUpdate(memory);
-        bool bootstrapBaseline = bootstrapSample && _nativeLoadBootstrap.ObserveQualifyingPostUpdate() &&
+        bool bootstrapBaseline = bootstrapSample &&
+            _nativeLoadBootstrap.ObserveQualifyingPostUpdate(observedRoom.ManagedKey()) &&
             _nativeLoadBootstrap.ConsumeSafeBaseline();
         if (_nativeLoadBootstrap.Armed && bootstrapSample)
             TraceTransition(MovementTransitionTraceSource.BootstrapSample, observedRoom.ManagedKey(),
-                $"qualifying:{_nativeLoadBootstrap.ConsecutiveQualifyingSamples}", "none");
+                _nativeLoadBootstrap.Phase == NativeLoadBootstrapPhase.ProvisionalSelected
+                    ? $"quiet:{_nativeLoadBootstrap.ConsecutiveQuietSamples}"
+                    : $"qualifying:{_nativeLoadBootstrap.ConsecutiveQualifyingSamples}", "none");
+        if (bootstrapSample && _nativeLoadBootstrap.CompleteQuietSettle())
+        {
+            _fileSelectLoadTransaction.Complete();
+            TraceTransition(MovementTransitionTraceSource.BootstrapClosed, observedRoom.ManagedKey(),
+                $"QUIET_SETTLE:{NativeLoadBootstrapState.RequiredQuietSettleSamples}", "none");
+        }
         bool bootstrapRebaseline = _nativeLoadBootstrap.Armed && !bootstrapBaseline &&
             _roomKnown && !_room.Equals(observedRoom);
         if (bootstrapRebaseline)
@@ -1335,10 +1341,12 @@ public sealed class CoopFeasibility : IMod
             {
                 _fileSelectLoadTransaction.Complete();
                 TraceTransition(MovementTransitionTraceSource.BootstrapClosed, observedRoom.ManagedKey(),
-                    "RECONSTRUCTED", "none");
+                    "CHANGED_IDENTITY", "none");
             }
             TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
-                bootstrapClosed ? "Selected:bootstrap-closed-post-load-identity" : reconstruction.ToString(),
+                bootstrapClosed ? "Selected:bootstrap-closed-changed-identity" :
+                    _nativeLoadBootstrap.Phase == NativeLoadBootstrapPhase.ProvisionalSelected
+                        ? "Selected:bootstrap-provisional" : reconstruction.ToString(),
                 "cleared");
             if (requested)
             {
