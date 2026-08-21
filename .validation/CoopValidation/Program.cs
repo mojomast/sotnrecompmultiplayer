@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Runtime.CompilerServices;
+using System.Reflection;
 using CoopFeasibilityMod;
 using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Dispatch;
@@ -30,6 +31,7 @@ internal static partial class Program
         "PostHook:dra:RunMainEngine",
         "PostHook:dra:UpdatePlayerEntities",
         "PostHook:main:DrawOTag",
+        "PostHook:sel:ApplySaveData_sel",
         "PreHook:dra:RenderEntities",
         "PreHook:dra:RunMainEngine"
     ];
@@ -70,6 +72,7 @@ internal static partial class Program
             string version = ValidateManifest(manifestText);
             ValidateSource(sourceText, version);
             ValidateHostContracts(hostRoot);
+            ValidateFileSelectPostHook();
             RunNegativeContractTests(manifestText, sourceText, version, hostRoot);
             ValidateGeneratedDiagnostics();
             ValidateGuardedDirectDispatch();
@@ -296,9 +299,13 @@ internal static partial class Program
         if (!source.Contains("Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);", StringComparison.Ordinal) ||
             source.Contains("_nativeLoadBootstrap.Arm(beforeReload", StringComparison.Ordinal) ||
             !source.Contains("private void OnSaveLoaded(SaveLoadedEvent e)", StringComparison.Ordinal) ||
-            !source.Contains("_nativeLoadBootstrap.Arm();", StringComparison.Ordinal) ||
+            !source.Contains("[PostHook(\"sel\", \"ApplySaveData_sel\")]", StringComparison.Ordinal) ||
+            !source.Contains("private static void AfterFileSelectApplySaveData(CpuContext context, IMemory memory)", StringComparison.Ordinal) ||
+            !source.Contains("if (context.V0 != 0) return;", StringComparison.Ordinal) ||
+            !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"armed:sel-post\")", StringComparison.Ordinal) ||
+            !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"event-supplementary\")", StringComparison.Ordinal) ||
             source.Contains("e.Block", StringComparison.Ordinal))
-            throw new InvalidOperationException("Native load bootstrap must arm only from SaveLoadedEvent.");
+            throw new InvalidOperationException("Native load bootstrap must use the direct file-select post-hook with SaveLoadedEvent supplementary only.");
         if (!source.Contains("IsNativeLoadQualifyingPostUpdate(memory)", StringComparison.Ordinal) ||
             !source.Contains("_nativeLoadBootstrap.Stable", StringComparison.Ordinal) ||
             !source.Contains("memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default", StringComparison.Ordinal) ||
@@ -459,6 +466,54 @@ internal static partial class Program
         Console.WriteLine($"[CoopValidation] Extraction dispatch evidence: scratch={length}, guest-throw-restored=true, warmed-calls=10000, bytes={allocated}.");
     }
 
+    private static int _fileSelectOriginalCalls;
+    private static int _fileSelectPostCalls;
+    private static bool _fileSelectSuccessResultObserved;
+
+    private static void ValidateFileSelectPostHook()
+    {
+        Dispatcher.Register("sel", new FileSelectProbeOverlay());
+        SymbolRegistry.Build();
+        MethodInfo target = SymbolRegistry.Resolve("sel", "ApplySaveData_sel", 0)
+            ?? throw new InvalidOperationException("HookManager could not resolve sel/ApplySaveData_sel.");
+        MethodInfo post = typeof(Program).GetMethod(nameof(AfterFileSelectApplyProbe),
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("File-select post-hook probe is missing.");
+        var mod = new ModInfo { Id = "coop-validation-file-select" };
+        if (!HookManager.AddPost(mod, target, post))
+            throw new InvalidOperationException("HookManager rejected the file-select post-hook signature.");
+
+        try
+        {
+            HookManager.Commit();
+            _fileSelectOriginalCalls = 0;
+            _fileSelectPostCalls = 0;
+            _fileSelectSuccessResultObserved = false;
+            FileSelectProbeOverlay.ApplySaveData_sel(new CpuContext(), new FaultMemory(1));
+            if (_fileSelectOriginalCalls != 1 || _fileSelectPostCalls != 1 || !_fileSelectSuccessResultObserved)
+                throw new InvalidOperationException("File-select post-hook did not run after the successful original apply function.");
+        }
+        finally
+        {
+            HookManager.RemoveMod(mod);
+        }
+
+        Console.WriteLine("[CoopValidation] File-select post-hook evidence: sel/ApplySaveData_sel resolved, successful-original-then-post=true.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void FileSelectApplyProbe(CpuContext context, IMemory memory)
+    {
+        _fileSelectOriginalCalls++;
+        context.V0 = 0;
+    }
+
+    private static void AfterFileSelectApplyProbe(CpuContext context, IMemory memory)
+    {
+        _fileSelectPostCalls++;
+        _fileSelectSuccessResultObserved = context.V0 == 0;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool RunScratchDispatchCycle(CpuContext context, IMemory memory, uint scratchStart)
     {
@@ -595,6 +650,21 @@ internal static partial class Program
         public IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> Functions => DispatchFunctions;
     }
 
+    private sealed class FileSelectProbeOverlay : IOverlay
+    {
+        private static readonly IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> FileSelectFunctions =
+            new Dictionary<uint, Action<CpuContext, IMemory>> { [0x801FF004] = ApplySaveData_sel };
+
+        public string Name => "sel";
+        public IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> Functions => FileSelectFunctions;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void ApplySaveData_sel(CpuContext context, IMemory memory)
+        {
+            FileSelectApplyProbe(context, memory);
+        }
+    }
+
     private sealed class FaultMemory : IMemory
     {
         internal readonly byte[] Bytes;
@@ -652,6 +722,8 @@ internal static partial class Program
                 StringComparer.Ordinal);
         if (!overlays.TryGetValue("dra", out string? draMap) || !string.Equals(draMap, "funcmaps/dra.json", StringComparison.Ordinal))
             throw new InvalidOperationException("Host dra overlay/function-map contract is missing.");
+        if (!overlays.TryGetValue("sel", out string? selMap) || !string.Equals(selMap, "funcmaps/stsel.json", StringComparison.Ordinal))
+            throw new InvalidOperationException("Host sel overlay/function-map contract is missing.");
         if (!overlays.TryGetValue("cen", out string? cenMap) || !string.Equals(cenMap, "funcmaps/stcen.json", StringComparison.Ordinal))
             throw new InvalidOperationException("Host cen overlay/function-map contract is missing.");
 
@@ -659,6 +731,8 @@ internal static partial class Program
             "main", ["DrawOTag"]);
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "dra.json")),
             "dra", ["RenderEntities", "RunMainEngine", "UpdatePlayerEntities"]);
+        ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "stsel.json")),
+            "sel", ["ApplySaveData"]);
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "stcen.json")),
             "cen", ["GetDistanceToPlayerX", "GetDistanceToPlayerY", "GetSideToPlayer"]);
 
@@ -693,6 +767,7 @@ internal static partial class Program
             [("dra", "RenderEntities")] = "RenderEntities",
             [("dra", "RunMainEngine")] = "RunMainEngine",
             [("dra", "UpdatePlayerEntities")] = "UpdatePlayerEntities",
+            [("sel", "ApplySaveData")] = "ApplySaveData_sel",
             [("cen", "GetDistanceToPlayerX")] = "GetDistanceToPlayerX_cen",
             [("cen", "GetDistanceToPlayerY")] = "GetDistanceToPlayerY_cen",
             [("cen", "GetSideToPlayer")] = "GetSideToPlayer_cen"

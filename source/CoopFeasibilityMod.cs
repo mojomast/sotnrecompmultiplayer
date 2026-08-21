@@ -949,15 +949,30 @@ public sealed class CoopFeasibility : IMod
     {
         try
         {
-            _nativeLoadBootstrap.Arm();
-            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
-            _reconstructionTriggerReason = TetherReason.Reconstruction;
-            TraceTransition(MovementTransitionTraceSource.SaveLoaded, default, "armed:event-redacted", "none");
+            ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, "event-supplementary");
         }
         catch (Exception ex)
         {
             Fail("SaveLoaded event", ex);
         }
+    }
+
+    [PostHook("sel", "ApplySaveData_sel")]
+    private static void AfterFileSelectApplySaveData(CpuContext context, IMemory memory)
+    {
+        CoopFeasibility? mod = _instance;
+        if (mod == null) return;
+        if (context.V0 != 0) return;
+        try { mod.ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, "armed:sel-post"); }
+        catch (Exception ex) { mod.Fail("file-select ApplySaveData hook", ex); }
+    }
+
+    private void ArmNativeLoadBootstrap(MovementTransitionTraceSource source, string detail)
+    {
+        _nativeLoadBootstrap.Arm();
+        _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+        _reconstructionTriggerReason = TetherReason.Reconstruction;
+        TraceTransition(source, default, detail, "none");
     }
 
     private void OnRoomLayerLoaded(RoomLayerLoadEvent e)
