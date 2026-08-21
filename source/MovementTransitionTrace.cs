@@ -35,9 +35,19 @@ public sealed class MovementTransitionTrace
         string retry, NativeLoadBootstrapPhase bootstrapPhase, int layerStage = -1, int layerIndex = -1)
     {
         if (frame < 0 || hookSequence < 0) throw new ArgumentOutOfRangeException(nameof(frame));
-        _entries[_next] = new MovementTransitionTraceEntry(frame, hookSequence, source, state.TransitionOrigin,
+        var entry = new MovementTransitionTraceEntry(frame, hookSequence, source, state.TransitionOrigin,
             current, state.TransitionPending, state.AwaitingPostTransitionMovement,
             reconstruction, retry, bootstrapPhase, layerStage, layerIndex, state.Phase);
+        if (source == MovementTransitionTraceSource.Retry && retry == "Suppress" && _count > 0)
+        {
+            int previous = (_next - 1 + Capacity) % Capacity;
+            if (_entries[previous].EventSource == source && _entries[previous].Retry == retry)
+            {
+                _entries[previous] = entry;
+                return;
+            }
+        }
+        _entries[_next] = entry;
         _next = (_next + 1) % Capacity;
         if (_count < Capacity) _count++;
     }

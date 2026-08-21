@@ -2,7 +2,7 @@ using CoopFeasibilityMod;
 
 var tests = new List<(string Name, Action Run)>
 {
-    ("file select load transaction arms through loading before Play", () =>
+    ("occupied save live sequence arms through selector loading before Play", () =>
     {
         var transaction = new FileSelectLoadTransactionState();
         FileSelectLoadTransactionTransition observed = transaction.Observe(FileSelect());
@@ -19,6 +19,51 @@ var tests = new List<(string Name, Action Run)>
         Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
         True(transaction.BootstrapArmed);
     }),
+    ("occupied save live direct edge arms and observes fully normal Play", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(Observation(8, 6, 0x33));
+
+        FileSelectLoadTransactionTransition play = transaction.Observe(Observation(2, 3, 1));
+
+        True(play.Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        Equal(FileSelectLoadTransactionReason.DirectPlayInitialization, play.Reason);
+        Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
+    }),
+    ("New Game live direct edge arms and observes fully normal Play", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        FileSelectLoadTransactionTransition observed = transaction.Observe(Observation(8, 6, 0x33));
+        True(observed.Has(FileSelectLoadTransactionAction.FileSelectObserved));
+
+        FileSelectLoadTransactionTransition play = transaction.Observe(Observation(2, 3, 1));
+
+        True(play.Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        False(play.Has(FileSelectLoadTransactionAction.LoadingObserved));
+        False(play.Has(FileSelectLoadTransactionAction.Cancel));
+        Equal(FileSelectLoadTransactionReason.DirectPlayInitialization, play.Reason);
+        Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
+        True(transaction.BootstrapArmed);
+    }),
+    ("direct Play arm rejects unsafe step engine and loading observations", () =>
+    {
+        FileSelectLoadObservation[] rejected =
+        [
+            Observation(2, 4, 1),
+            Observation(2, 3, 2),
+            Observation(2, 3, 1, loading: true),
+        ];
+        foreach (FileSelectLoadObservation observation in rejected)
+        {
+            var transaction = new FileSelectLoadTransactionState();
+            transaction.Observe(FileSelect());
+            FileSelectLoadTransactionTransition cancel = transaction.Observe(observation);
+            True(cancel.Has(FileSelectLoadTransactionAction.Cancel));
+            False(cancel.Has(FileSelectLoadTransactionAction.ArmBootstrap));
+            Equal(FileSelectLoadTransactionReason.PlayBeforeLoading, cancel.Reason);
+            Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+        }
+    }),
     ("file select cancel back never arms", () =>
     {
         var transaction = new FileSelectLoadTransactionState();
@@ -28,6 +73,18 @@ var tests = new List<(string Name, Action Run)>
         False(cancel.Has(FileSelectLoadTransactionAction.CancelBootstrap));
         Equal(FileSelectLoadTransactionReason.ReturnedToMainMenuIdle, cancel.Reason);
         False(transaction.BootstrapArmed);
+    }),
+    ("file select return to title cancels without arming", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(FileSelect());
+
+        FileSelectLoadTransactionTransition cancel = transaction.Observe(Observation(1, 0, 0));
+
+        True(cancel.Has(FileSelectLoadTransactionAction.Cancel));
+        False(cancel.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+        Equal(FileSelectLoadTransactionReason.ReturnedToTitle, cancel.Reason);
+        Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
     }),
     ("file select transaction times out bounded", () =>
     {
@@ -49,7 +106,7 @@ var tests = new List<(string Name, Action Run)>
         True(timeout.Has(FileSelectLoadTransactionAction.CancelBootstrap));
         Equal(FileSelectLoadTransactionReason.Timeout, timeout.Reason);
     }),
-    ("new game and unsupported selector paths fail closed", () =>
+    ("unsupported selector paths fail closed", () =>
     {
         var transaction = new FileSelectLoadTransactionState();
         transaction.Observe(FileSelect());
@@ -438,6 +495,27 @@ var tests = new List<(string Name, Action Run)>
         Equal(NativeLoadBootstrapPhase.Closed, entries[^1].BootstrapPhase);
         False(entries[^1].TransitionPending);
         Equal((byte)(MovementTransitionTrace.Capacity + 1), entries[^1].Current.Room);
+    }),
+    ("retry suppress trace coalescing retains file select arm evidence", () =>
+    {
+        ManagedMovementSessionReducer session = Active(Room(1));
+        var trace = new MovementTransitionTrace();
+        trace.Record(1, 1, MovementTransitionTraceSource.FileSelectObserved, session.State,
+            Room(1), "NativeFileSelect", "none", NativeLoadBootstrapPhase.Closed);
+        trace.Record(2, 2, MovementTransitionTraceSource.FileSelectArm, session.State,
+            Room(1), "DirectPlayInitialization", "none", NativeLoadBootstrapPhase.Armed);
+        for (int index = 0; index < 60; index++)
+            trace.Record(3 + index, 3 + index, MovementTransitionTraceSource.Retry, session.State,
+                Room(1), "none", "Suppress", NativeLoadBootstrapPhase.Armed);
+
+        MovementTransitionTraceEntry[] entries = trace.Snapshot();
+        Equal(3, entries.Length);
+        Equal(MovementTransitionTraceSource.FileSelectObserved, entries[0].EventSource);
+        Equal(MovementTransitionTraceSource.FileSelectArm, entries[1].EventSource);
+        Equal(MovementTransitionTraceSource.Retry, entries[2].EventSource);
+        Equal("Suppress", entries[2].Retry);
+        Equal(62L, entries[2].Frame);
+        Equal(62L, entries[2].HookSequence);
     }),
     ("reload reset fatal and unload phases fail closed", () =>
     {

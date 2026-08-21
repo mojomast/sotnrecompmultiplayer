@@ -36,6 +36,7 @@ public enum FileSelectLoadTransactionReason : byte
     Fatal,
     Unload,
     DiagnosticReset,
+    DirectPlayInitialization,
 }
 
 public readonly record struct FileSelectLoadObservation(
@@ -103,10 +104,14 @@ public sealed class FileSelectLoadTransactionState
                 return Cancel(FileSelectLoadTransactionReason.ReturnedToMainMenuIdle);
             if (observation.GameStateRaw == MainMenuState)
                 return Cancel(FileSelectLoadTransactionReason.UnsupportedFileSelectPath);
+            if (observation.GameStateRaw == PlayState)
+            {
+                if (IsFullyNormalPlay(observation))
+                    return ArmDirectPlay();
+                return Cancel(FileSelectLoadTransactionReason.PlayBeforeLoading);
+            }
             if (observation.Loading)
                 return Arm(FileSelectLoadTransactionReason.NowLoading);
-            if (observation.GameStateRaw == PlayState)
-                return Cancel(FileSelectLoadTransactionReason.PlayBeforeLoading);
             return Cancel(FileSelectLoadTransactionReason.IncompatibleState);
         }
 
@@ -145,6 +150,13 @@ public sealed class FileSelectLoadTransactionState
             FileSelectLoadTransactionAction.ArmBootstrap, reason);
     }
 
+    private FileSelectLoadTransactionTransition ArmDirectPlay()
+    {
+        Phase = FileSelectLoadTransactionPhase.PlayObserved;
+        return new(FileSelectLoadTransactionAction.ArmBootstrap,
+            FileSelectLoadTransactionReason.DirectPlayInitialization);
+    }
+
     private void Reset()
     {
         Phase = FileSelectLoadTransactionPhase.Idle;
@@ -160,6 +172,10 @@ public sealed class FileSelectLoadTransactionState
         observation.GameStateRaw == MainMenuState &&
         observation.GameStepRaw == FileSelectGameStep &&
         observation.EngineStepRaw is 0x100 or 0x101 or 0x104;
+
+    private static bool IsFullyNormalPlay(in FileSelectLoadObservation observation) =>
+        observation.GameStateRaw == PlayState && observation.GameStepRaw == 3 &&
+        observation.EngineStepRaw == 1 && !observation.Loading;
 
     private static bool IsMainMenuIdle(in FileSelectLoadObservation observation) =>
         observation.GameStateRaw == MainMenuState &&
