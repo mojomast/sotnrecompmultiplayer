@@ -324,6 +324,14 @@ internal static partial class Program
             !source.Contains("memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default", StringComparison.Ordinal) ||
             !source.Contains("memory.ReadU32(EngineStepAddress) == 1", StringComparison.Ordinal))
             throw new InvalidOperationException("Native load bootstrap must gate baseline and reconstruction on stable post-update Play samples.");
+        if (!source.Contains("RequiredQuietSettleSamples = 60", StringComparison.Ordinal) ||
+            !source.Contains("ObserveQualifyingPostUpdate(observedRoom.ManagedKey())", StringComparison.Ordinal) ||
+            !source.Contains("_nativeLoadBootstrap.ObserveLayer();", StringComparison.Ordinal) ||
+            !source.Contains("_nativeLoadBootstrap.CompleteQuietSettle()", StringComparison.Ordinal) ||
+            !source.Contains("Selected:bootstrap-provisional", StringComparison.Ordinal) ||
+            !source.Contains("QUIET_SETTLE:", StringComparison.Ordinal) ||
+            !source.Contains("CHANGED_IDENTITY", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native load bootstrap must retain provisional identity and trace bounded closure reasons.");
         ValidateOrdering(source, "private void OnRoomLayerLoaded(", "[PostHook(\"dra\", \"RunMainEngine\")]",
             ["BeginTransition();", "_movementSession.RoomLayerLoaded();"]);
         if (!source.Contains("if (_nativeLoadBootstrap.Armed)", StringComparison.Ordinal) ||
