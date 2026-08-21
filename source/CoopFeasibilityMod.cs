@@ -93,6 +93,8 @@ public sealed class CoopFeasibility : IMod
     private const int ProtectedPlayerRuntimeLength = 0x03CE;
     private const uint ProtectedStatusAddress = 0x80097964;
     private const int ProtectedStatusLength = 0x0334;
+    private const uint NativeExpOffset = 0x288;
+    private const uint NativeKillCountOffset = 0x290;
     private const uint ProtectedCastleFlagsAddress = 0x8003BDEC;
     private const int ProtectedCastleFlagsLength = 0x0300;
     private const uint ProtectedCastleMapAddress = 0x8006BB74;
@@ -327,6 +329,7 @@ public sealed class CoopFeasibility : IMod
     private int _compatibleZeroHpHits;
     private string _enemyDiagnosticStatus = "WAIT";
     private readonly NativeDropObservationTracker _dropTracker = new();
+    private readonly NativeExpObservationAdapter _nativeExpObservation = new();
     private bool _dropWindowOpen;
 
     private bool _awarenessDisabled;
@@ -446,6 +449,20 @@ public sealed class CoopFeasibility : IMod
         public void Save() => RecompOne.Runtime.Runtime.SaveView();
     }
 
+    private sealed class NativeExpObservationAdapter : INativeExpObservationSource
+    {
+        private IMemory _memory = null!;
+
+        public bool MemoryAvailable => Game.Available;
+        public bool InGame => Game.InGame;
+        public bool IsLoading => Game.IsLoading;
+        public bool IsAlucard => Game.Character == PlayableCharacter.Alucard;
+        public bool IsMarbleGallery => Game.StageId == Stage.MarbleGallery;
+
+        public void Bind(IMemory memory) => _memory = memory;
+        public uint ReadUnsignedExp() => _memory.ReadU32(Game.StatusAddr + NativeExpOffset);
+    }
+
     // This is the only bridge used by the attack publication policy. The policy itself has no
     // dependency on guest memory or dispatch and this adapter is reused to keep windows allocation-free.
     private sealed class NativeAttackPublicationAdapter : IAttackPublicationAdapter, IAttackTargetReadAdapter
@@ -499,14 +516,16 @@ public sealed class CoopFeasibility : IMod
             int scrollY = unchecked((int)_memory.ReadU32(ScrollYAddress)) >> 16;
             int worldX = _profile.Kind == AttackKind.Projectile ? _mod._projectileX : _mod._proxyX;
             int worldY = _profile.Kind == AttackKind.Projectile ? _mod._projectileY : _mod._proxyY;
-            _memory.WriteU32(_entity, unchecked((uint)(((worldX >> 16) - scrollX) << 16)));
-            _memory.WriteU32(_entity + 0x04, unchecked((uint)(((worldY >> 16) - scrollY) << 16)));
-            _memory.WriteU16(_entity + EntityHitboxOffsetX, unchecked((ushort)(_profile.Kind == AttackKind.Projectile ? 0 : 14)));
-            _memory.WriteU16(_entity + EntityHitboxOffsetY, unchecked((ushort)(_profile.Kind == AttackKind.Projectile ? 0 : -8)));
+            _memory.WriteU32(_entity, NativeAttackPublication.ScreenPosition(worldX, scrollX));
+            _memory.WriteU32(_entity + 0x04, NativeAttackPublication.ScreenPosition(worldY, scrollY));
+            _memory.WriteU16(_entity + EntityHitboxOffsetX, unchecked((ushort)(_profile.Kind == AttackKind.Projectile
+                ? 0 : NativeAttackPublication.ContactOffsetX)));
+            _memory.WriteU16(_entity + EntityHitboxOffsetY, unchecked((ushort)(_profile.Kind == AttackKind.Projectile
+                ? 0 : NativeAttackPublication.ContactOffsetY)));
             _memory.WriteU16(_entity + EntityFacingOffset, (ushort)(_mod._facingLeft ? 1 : 0));
             _memory.WriteU16(_entity + 0x2C, 1);
             _memory.WriteU16(_entity + 0x32, _profile.Source);
-            _memory.WriteU32(_entity + EntityFlagsOffset, 0x00020000);
+            _memory.WriteU32(_entity + EntityFlagsOffset, NativeAttackPublication.EntityFlags);
             _memory.WriteU16(_entity + EntityAttackOffset, unchecked((ushort)_profile.Attack));
             _memory.WriteU16(_entity + EntityAttackElementOffset, _profile.Element);
             _memory.WriteU8(_entity + EntityHitboxWidthOffset, _profile.HalfWidth);
@@ -536,10 +555,15 @@ public sealed class CoopFeasibility : IMod
             _mod._attackAttackerIdValid = _mod._attackLastAttackerId is >= 0 and < 11;
             if (!_mod._attackAttackerIdValid)
                 throw new InvalidOperationException($"attacker ID {_mod._attackLastAttackerId} is outside native cooldown bounds");
-            _mod.CaptureAttackTargets(this);
+            (long? nativeExp, long? nativeKills) = ReadNativeRewards();
+            _mod.CaptureAttackTargets(this, nativeExp, nativeKills);
         }
 
-        public void ObserveNative(in AttackPublicationTuple tuple) => _mod.ObserveAttackResult(this);
+        public void ObserveNative(in AttackPublicationTuple tuple)
+        {
+            (long? nativeExp, long? nativeKills) = ReadNativeRewards();
+            _mod.ObserveAttackResult(this, nativeExp, nativeKills);
+        }
 
         public void DeactivateLiveField(in AttackPublicationTuple tuple, int field)
         {
@@ -553,11 +577,12 @@ public sealed class CoopFeasibility : IMod
         {
             int scrollX = unchecked((int)_memory.ReadU32(ScrollXAddress)) >> 16;
             int scrollY = unchecked((int)_memory.ReadU32(ScrollYAddress)) >> 16;
-            _memory.WriteU32(_entity, unchecked((uint)(((_mod._projectileX >> 16) - scrollX) << 16)));
-            _memory.WriteU32(_entity + 0x04, unchecked((uint)(((_mod._projectileY >> 16) - scrollY) << 16)));
+            _memory.WriteU32(_entity, NativeAttackPublication.ScreenPosition(_mod._projectileX, scrollX));
+            _memory.WriteU32(_entity + 0x04, NativeAttackPublication.ScreenPosition(_mod._projectileY, scrollY));
             _memory.WriteU8(_entity + 0x48, 0);
             _memory.WriteU16(_entity + 0x44, 0);
-            _mod.CaptureAttackTargets(this);
+            (long? nativeExp, long? nativeKills) = ReadNativeRewards();
+            _mod.CaptureAttackTargets(this, nativeExp, nativeKills);
         }
 
         public void ClearOwnedSlot(in AttackPublicationTuple tuple)
@@ -572,6 +597,15 @@ public sealed class CoopFeasibility : IMod
         public byte ReadTargetU8(uint address, uint offset) => _memory.ReadU8(address + offset);
         public ushort ReadTargetU16(uint address, uint offset) => _memory.ReadU16(address + offset);
         public uint ReadTargetU32(uint address, uint offset) => _memory.ReadU32(address + offset);
+
+        private (long? Exp, long? Kills) ReadNativeRewards()
+        {
+            _mod._nativeExpObservation.Bind(_memory);
+            long? exp = NativeExpObservation.TryRead(_mod._nativeExpObservation);
+            if (exp is null) return (null, null);
+            try { return (exp, (long)_memory.ReadU32(Game.StatusAddr + NativeKillCountOffset)); }
+            catch (Exception) { return (null, null); }
+        }
     }
 
     private int _slotSamples;
@@ -1077,11 +1111,20 @@ public sealed class CoopFeasibility : IMod
             mod._tapSeen |= mod._gameTapped;
             mod.ObserveOwnedAttackWindow(memory);
             mod.CompleteDropObservation(memory);
+            mod.CleanupOwnedAttack(memory, mod.AutomaticInputSafe(memory) ? "WINDOW" : "UNSAFE");
             mod.UpdateContactShadow(memory);
         }
         catch (Exception ex)
         {
             mod.Fail("RunMainEngine hook", ex);
+        }
+        finally
+        {
+            if (mod._dropWindowOpen)
+            {
+                mod._dropTracker.Cancel();
+                mod._dropWindowOpen = false;
+            }
         }
     }
 
@@ -1093,7 +1136,6 @@ public sealed class CoopFeasibility : IMod
         try
         {
             mod._updateCalls++;
-            mod.CleanupOwnedAttack(memory, mod.AutomaticInputSafe(memory) ? "WINDOW" : "UNSAFE");
             if (mod._fatal) return;
             mod.UpdateProxy(context, memory);
             mod.TrySpawnOwnedAttack(context, memory);
@@ -3357,8 +3399,8 @@ public sealed class CoopFeasibility : IMod
             return false;
         profile = new AttackProfile(kind, checked((ushort)item), attack, element,
             invincibility, stun, hitState, hitEffect,
-            kind == AttackKind.Projectile ? (byte)5 : (byte)12,
-            kind == AttackKind.Projectile ? (byte)5 : (byte)10,
+            kind == AttackKind.Projectile ? (byte)5 : NativeAttackPublication.ContactHalfWidth,
+            kind == AttackKind.Projectile ? (byte)5 : NativeAttackPublication.ContactHalfHeight,
             _facingLeft ? -1 : 1, source);
         return true;
     }
@@ -3421,12 +3463,13 @@ public sealed class CoopFeasibility : IMod
         _projectileLifetime = 0;
         _attackPublicationAdapter.Bind(memory, entity, profile, context);
         var publicationTuple = new AttackPublicationTuple(slot, generation, roomHash);
+        long firstCollisionMain = NativeAttackPublication.FirstCollisionMainGeneration(_mainEngineCalls);
         bool completed = AttackPublicationPolicy.Publish(ref _attackPublication, _attackPublicationAdapter,
-            publicationTuple, _mainEngineCalls, _updateCalls);
+            publicationTuple, firstCollisionMain, _updateCalls);
         if (completed)
         {
             _attackWindowObserved = false;
-            _attackArmMainGeneration = _mainEngineCalls;
+            _attackArmMainGeneration = firstCollisionMain;
             _attackArmUpdateGeneration = _updateCalls;
             _attackObservedMainGeneration = -1;
             _attackAllocations++;
@@ -3463,6 +3506,9 @@ public sealed class CoopFeasibility : IMod
             return TryCleanupQuarantinedAttack(memory, reason);
         if (_attackPublication.Phase is AttackPublicationPhase.MutationStopped or
             AttackPublicationPhase.ResidualStopped) return false;
+        if (reason == "WINDOW" && NativeAttackPublication.ShouldDeferNormalCleanup(
+            _mainEngineCalls, _attackArmMainGeneration, _attackWindowObserved))
+            return true;
         int slot = request.Lease.Slot;
         uint generation = request.Lease.Generation;
         uint roomHash = request.Lease.RoomHash;
@@ -3492,7 +3538,13 @@ public sealed class CoopFeasibility : IMod
         {
             if (!_attackWindowObserved)
             {
-                try { ObserveAttackResult(_attackPublicationAdapter); }
+                try
+                {
+                    _nativeExpObservation.Bind(memory);
+                    long? nativeExp = NativeExpObservation.TryRead(_nativeExpObservation);
+                    long? nativeKills = nativeExp is null ? null : (long)memory.ReadU32(Game.StatusAddr + NativeKillCountOffset);
+                    ObserveAttackResult(_attackPublicationAdapter, nativeExp, nativeKills);
+                }
                 catch (Exception ex) { MarkAttackHardFailure($"OBSERVE:{ex.GetType().Name}"); }
             }
         }
@@ -3720,7 +3772,7 @@ public sealed class CoopFeasibility : IMod
         return false;
     }
 
-    private void CaptureAttackTargets(IAttackTargetReadAdapter adapter)
+    private void CaptureAttackTargets(IAttackTargetReadAdapter adapter, long? nativeExp, long? nativeKills)
     {
         _attackTargets.Clear();
         if (!_attackProfileLatched) return;
@@ -3729,16 +3781,16 @@ public sealed class CoopFeasibility : IMod
         int worldY = profile.Kind == AttackKind.Projectile ? _projectileY : _proxyY;
         var input = new AttackTargetCaptureInput(worldX, worldY,
             profile.Kind == AttackKind.Projectile, _facingLeft, profile.HalfWidth,
-            profile.HalfHeight, profile.HitState, _attackLastAttackerId);
+            profile.HalfHeight, profile.HitState, _attackLastAttackerId, nativeExp, nativeKills);
         AttackTargetObservationPolicy.Capture(_attackTargets, adapter, input);
     }
 
-    private void ObserveAttackResult(IAttackTargetReadAdapter adapter)
+    private void ObserveAttackResult(IAttackTargetReadAdapter adapter, long? nativeExp, long? nativeKills)
     {
         _attackWindowObserved = true;
         _attackObservedMainGeneration = _mainEngineCalls;
         AttackTargetObservation result = AttackTargetObservationPolicy.Observe(_attackTargets,
-            adapter, _attackLastAttackerId);
+            adapter, _attackLastAttackerId, nativeExp, nativeKills);
         if (result.HitFlag) _attackHitFlagObservations++;
         _attackTargetHpChanges += result.HpChanges;
         _attackCooldownObservations += result.CooldownChanges;
@@ -3766,17 +3818,39 @@ public sealed class CoopFeasibility : IMod
         if (_dropWindowOpen) { _dropTracker.Cancel(); _dropWindowOpen = false; }
         if (!Game.Available || !Game.InGame || Game.IsLoading ||
             memory.ReadU8(Game.StageIdAddr) != (byte)Stage.MarbleGallery) return;
-        _dropTracker.BeginWindow(_movementSession.RoomEpoch, null);
+        _nativeExpObservation.Bind(memory);
+        long? nativeExp = NativeExpObservation.TryRead(_nativeExpObservation);
+        _dropTracker.BeginWindow(_movementSession.RoomEpoch, nativeExp);
         _dropWindowOpen = true;
-        ScanDropSlots(memory, before: true);
+        try
+        {
+            ScanDropSlots(memory, before: true);
+        }
+        catch
+        {
+            _dropTracker.Cancel();
+            _dropWindowOpen = false;
+            throw;
+        }
     }
 
     private void CompleteDropObservation(IMemory memory)
     {
         if (!_dropWindowOpen) return;
-        ScanDropSlots(memory, before: false);
-        _dropTracker.CompleteWindow(null); // Native EXP has no validated read contract yet.
-        _dropWindowOpen = false;
+        bool completed = false;
+        try
+        {
+            _nativeExpObservation.Bind(memory);
+            long? nativeExp = NativeExpObservation.TryRead(_nativeExpObservation);
+            ScanDropSlots(memory, before: false);
+            _dropTracker.CompleteWindow(nativeExp);
+            completed = true;
+        }
+        finally
+        {
+            if (!completed) _dropTracker.Cancel();
+            _dropWindowOpen = false;
+        }
         if (_dropTracker.Diagnostics.Faulted)
             throw new InvalidOperationException("bounded native drop tracker faulted");
     }
@@ -3802,6 +3876,8 @@ public sealed class CoopFeasibility : IMod
     private void ObserveOwnedAttackWindow(IMemory memory)
     {
         if (_ownedAttackSlot < 0 || _attackWindowObserved) return;
+        if (!NativeAttackPublication.IsCollisionObservationDue(_mainEngineCalls,
+            _attackArmMainGeneration)) return;
         int slot = _ownedAttackSlot;
         AttackLeaseCommand probe = AttackLeaseMachine.RequestOwnedCleanup(_attackLease);
         uint entity = Game.EntitiesAddr + (uint)(slot * Entity.Stride);
@@ -3833,7 +3909,9 @@ public sealed class CoopFeasibility : IMod
             uint entity = Game.EntitiesAddr + (uint)(_ownedAttackSlot * Entity.Stride);
             exact = memory.ReadU32(entity + 0x7C) == AttackMarker &&
                 memory.ReadU32(entity + 0x80) == _ownedAttackGeneration &&
-                memory.ReadU32(entity + 0x84) == _ownedAttackRoomHash;
+                memory.ReadU32(entity + 0x84) == _ownedAttackRoomHash &&
+                NativeAttackPublication.IsCollisionObservationDue(_mainEngineCalls,
+                    _attackArmMainGeneration);
         }
         _exactOwnedAttackLifetime = ExactOwnedAttackLifetimeReducer.Observe(
             _exactOwnedAttackLifetime, exact);

@@ -7,6 +7,41 @@ public enum AttackPublicationPhase { Empty, Live, Observed, RolledBack, Retryabl
 public enum AttackSlotObservation { Free, Exact, Reused }
 public enum AttackUnloadResult { NoLease, Cleaned, ResidualMemoryUnavailable, ResidualFault, OwnershipMismatch }
 
+public static class NativeAttackPublication
+{
+    // Native player attacks are screen-space entities. RunMainEngine applies the camera delta
+    // only to this flag, keeping a published hitbox aligned until the next HitDetection call.
+    public const uint EntityFlags = 0x08000000;
+    public const int ContactOffsetX = 14;
+    public const int ContactOffsetY = 1;
+    public const byte ContactHalfWidth = 12;
+    public const byte ContactHalfHeight = 20;
+
+    public static uint ScreenPosition(int worldRaw, int scroll) =>
+        unchecked((uint)(((worldRaw >> 16) - scroll) << 16));
+
+    // Initial publication occurs after this invocation's HitDetection but before its post-hook.
+    public static long FirstCollisionMainGeneration(long currentCompletedMainGeneration)
+    {
+        _ = checked(currentCompletedMainGeneration + 2);
+        return currentCompletedMainGeneration + 1;
+    }
+
+    public static bool IsCollisionObservationDue(long currentCompletedMainGeneration,
+        long armedMainGeneration) => armedMainGeneration != long.MaxValue &&
+        currentCompletedMainGeneration == armedMainGeneration + 1;
+
+    public static bool ShouldDeferNormalCleanup(long currentCompletedMainGeneration,
+        long armedMainGeneration, bool observed) => !observed &&
+        !IsCollisionObservationDue(currentCompletedMainGeneration, armedMainGeneration);
+
+    public static bool Overlaps(int firstCenterX, int firstCenterY, int firstHalfWidth,
+        int firstHalfHeight, int secondCenterX, int secondCenterY, int secondHalfWidth,
+        int secondHalfHeight) =>
+        Math.Abs(firstCenterX - secondCenterX) < firstHalfWidth + secondHalfWidth &&
+        Math.Abs(firstCenterY - secondCenterY) < firstHalfHeight + secondHalfHeight;
+}
+
 public readonly struct AttackPublicationTuple
 {
     public readonly int Slot;

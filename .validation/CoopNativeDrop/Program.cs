@@ -18,6 +18,47 @@ var tests = new List<(string, Action)>
         Equal(1UL, t.Diagnostics.P2AssociatedSpawns); Equal(1UL, t.Diagnostics.ObservedNativeExpEvents);
         Equal(12UL, t.Diagnostics.ObservedNativeExpDelta);
     }),
+    ("delayed drop association does not reattribute unrelated later exp", () =>
+    {
+        var t = new NativeDropObservationTracker();
+        t.BeginWindow(7, 100); t.RecordUniqueCausalDefeat(7, 50, 60); t.CompleteWindow(100);
+        t.BeginWindow(7, 100); t.SetAfter(160, Prize(55, 64)); t.CompleteWindow(112);
+        Equal(1UL, t.Diagnostics.P2AssociatedSpawns); Equal(0UL, t.Diagnostics.ObservedNativeExpEvents);
+        Equal(0UL, t.Diagnostics.ObservedNativeExpDelta);
+    }),
+    ("causal one-shot observes live exp delta without requiring a drop", () =>
+    {
+        var t = new NativeDropObservationTracker();
+        t.BeginWindow(7, 26974); t.RecordUniqueCausalDefeat(7, 192, 182); t.CompleteWindow(26975);
+        Equal(1UL, t.Diagnostics.ObservedNativeExpEvents);
+        Equal(1UL, t.Diagnostics.ObservedNativeExpDelta);
+    }),
+    ("one native exp delta is counted once across causal and pickup evidence", () =>
+    {
+        var t = new NativeDropObservationTracker();
+        t.BeginWindow(7, 100); t.RecordUniqueCausalDefeat(7, 50, 60);
+        t.SetBefore(160, Prize(50, 60) with { Step = 5 }); t.CompleteWindow(112);
+        Equal(1UL, t.Diagnostics.Collections); Equal(1UL, t.Diagnostics.ObservedNativeExpEvents);
+        Equal(12UL, t.Diagnostics.ObservedNativeExpDelta);
+    }),
+    ("native exp gates faults and unsigned promotion", () =>
+    {
+        var source = new ExpSource { Value = uint.MaxValue };
+        Equal((long)uint.MaxValue, NativeExpObservation.TryRead(source));
+        source.MemoryAvailable = false;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        source.MemoryAvailable = true; source.InGame = false;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        source.InGame = true; source.IsLoading = true;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        source.IsLoading = false; source.IsAlucard = false;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        source.IsAlucard = true; source.IsMarbleGallery = false;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        source.IsMarbleGallery = true; source.ThrowOnRead = true;
+        Equal<long?>(null, NativeExpObservation.TryRead(source));
+        Equal(2, source.Reads);
+    }),
     ("causal defeat without drop expires bounded", () =>
     {
         var t = new NativeDropObservationTracker();
@@ -118,3 +159,22 @@ static void Set(object value, string field, object replacement) => value.GetType
 static void True(bool value) { if (!value) throw new InvalidOperationException("Expected true."); }
 static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual))
     throw new InvalidOperationException($"Expected {expected}, got {actual}."); }
+
+sealed class ExpSource : INativeExpObservationSource
+{
+    public bool MemoryAvailable { get; set; } = true;
+    public bool InGame { get; set; } = true;
+    public bool IsLoading { get; set; }
+    public bool IsAlucard { get; set; } = true;
+    public bool IsMarbleGallery { get; set; } = true;
+    public bool ThrowOnRead { get; set; }
+    public uint Value { get; set; }
+    public int Reads { get; private set; }
+
+    public uint ReadUnsignedExp()
+    {
+        Reads++;
+        if (ThrowOnRead) throw new InvalidOperationException("read fault");
+        return Value;
+    }
+}

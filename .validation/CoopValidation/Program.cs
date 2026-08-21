@@ -197,13 +197,29 @@ internal static partial class Program
             "public const ushort PrizeEntityId = 3;", "public const ushort EquipmentEntityId = 10;",
             "public const uint PrizeUpdate = 0x801C9220;",
             "public const uint EquipmentUpdate = 0x801C9C34;",
-            "Native EXP has no validated read contract yet"
+            "private const uint NativeExpOffset = 0x288;",
+            "return (long)source.ReadUnsignedExp();",
+            "long? nativeExp = NativeExpObservation.TryRead(_nativeExpObservation);"
         ];
         if (dropContracts.Any(fragment => !source.Contains(fragment, StringComparison.Ordinal)))
             throw new InvalidOperationException("NO0 native drop observation contract changed.");
         int trackerStart = source.IndexOf("public sealed class NativeDropObservationTracker", StringComparison.Ordinal);
         if (trackerStart < 0 || source[trackerStart..].Contains("WriteU", StringComparison.Ordinal))
             throw new InvalidOperationException("Native drop tracker must remain read-only.");
+        int expStart = source.IndexOf("internal static class NativeExpObservation", StringComparison.Ordinal);
+        int expEnd = expStart < 0 ? -1 : source.IndexOf("\nusing ", expStart, StringComparison.Ordinal);
+        if (expStart < 0 || expEnd < 0 || source[expStart..expEnd].Contains("WriteU", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native EXP observation must remain read-only.");
+        ValidateOrdering(source, "[PreHook(\"dra\", \"RunMainEngine\")]",
+            "[PostHook(\"dra\", \"RunMainEngine\")]", ["mod.BeginDropObservation(memory);"]);
+        ValidateOrdering(source, "[PostHook(\"dra\", \"RunMainEngine\")]",
+            "[PostHook(\"dra\", \"UpdatePlayerEntities\")]",
+            ["mod.ObserveOwnedAttackWindow(memory);", "mod.CompleteDropObservation(memory);", "finally",
+                "if (mod._dropWindowOpen)", "mod._dropTracker.Cancel();"]);
+        ValidateOrdering(source, "private void CompleteDropObservation(IMemory memory)",
+            "private void ScanDropSlots(IMemory memory, bool before)",
+            ["ScanDropSlots(memory, before: false);", "_dropTracker.CompleteWindow(nativeExp);", "finally",
+                "if (!completed) _dropTracker.Cancel();", "_dropWindowOpen = false;"]);
 
         int collisionStart = source.IndexOf("private bool TryCollision(", StringComparison.Ordinal);
         int collisionEnd = collisionStart < 0 ? -1 : source.IndexOf("private int CurrentHeadOffset", collisionStart,

@@ -3,6 +3,10 @@ using CoopFeasibilityMod;
 var tests = new List<(string Name, Action Run)>
 {
     ("contact publication has exact final-live order", ContactPublication),
+    ("native camera-locked publication preserves next-frame world alignment", CameraLockedPublication),
+    ("late initial publication skips same-main observation", LateInitialPublicationTiming),
+    ("contact survives timer expiry through one future collision then cleans", ContactFutureCollisionLifecycle),
+    ("room 52 floor target overlaps native-height contact publication", Room52ContactGeometry),
     ("projectile deactivates mutates and republishes", ProjectileWindow),
     ("exactly one native main-engine observation", ObservationGeneration),
     ("duplicate stale and out-of-order events fail closed", InvalidEvents),
@@ -17,6 +21,7 @@ var tests = new List<(string Name, Action Run)>
     ("generated contact projectile lifecycle sequences", GeneratedSequences),
     ("target capture conditional paths and Nth faults", TargetCapturePaths),
     ("target observation one and max paths and Nth faults", TargetObservationPaths),
+    ("one-shot teardown attribution is exact and fail-closed", OneShotTeardownAttribution),
     ("ordinary publication windows allocate nothing", AllocationFreeWindows),
     ("unload cleanup success", UnloadSuccess),
     ("unload cleanup fault retries synchronously", UnloadRetry),
@@ -76,6 +81,69 @@ static void ContactPublication()
     Equal("guest", fake.Log[^388]);
     Equal("post-enemy-id", fake.Log[^387]);
     fake.AssertProtected();
+}
+
+static void CameraLockedPublication()
+{
+    const int worldRaw = 713 << 16;
+    const int publishedScroll = 480;
+    const int collisionScroll = 487;
+    uint published = NativeAttackPublication.ScreenPosition(worldRaw, publishedScroll);
+    uint cameraAdjusted = unchecked(published + (uint)((publishedScroll - collisionScroll) << 16));
+
+    Equal(0x08000000U, NativeAttackPublication.EntityFlags);
+    Equal(NativeAttackPublication.ScreenPosition(worldRaw, collisionScroll), cameraAdjusted);
+}
+
+static void LateInitialPublicationTiming()
+{
+    long firstCollision = NativeAttackPublication.FirstCollisionMainGeneration(1725);
+    Equal(1726L, firstCollision);
+    False(1726L == firstCollision + 1); // Same invocation's AfterMainEngine is pre-collision.
+    True(1727L == firstCollision + 1);  // Next invocation has completed HitDetection and stage update.
+    False(NativeAttackPublication.IsCollisionObservationDue(1726, firstCollision));
+    True(NativeAttackPublication.IsCollisionObservationDue(1727, firstCollision));
+    True(NativeAttackPublication.ShouldDeferNormalCleanup(1726, firstCollision, false));
+    False(NativeAttackPublication.ShouldDeferNormalCleanup(1727, firstCollision, false));
+    False(NativeAttackPublication.ShouldDeferNormalCleanup(1727, firstCollision, true));
+    try
+    {
+        _ = NativeAttackPublication.FirstCollisionMainGeneration(long.MaxValue - 1);
+        throw new InvalidOperationException("Expected generation exhaustion.");
+    }
+    catch (OverflowException) { }
+}
+
+static void ContactFutureCollisionLifecycle()
+{
+    var fake = new FakeAdapter();
+    AttackPublicationState state = AttackPublicationPolicy.Initial();
+    long armedMain = NativeAttackPublication.FirstCollisionMainGeneration(1343);
+    True(AttackPublicationPolicy.Publish(ref state, fake, Tuple(), armedMain, 1319));
+
+    int contactTimer = 1;
+    contactTimer--;
+    Equal(0, contactTimer);
+    True(NativeAttackPublication.ShouldDeferNormalCleanup(1344, armedMain, false));
+    Equal(AttackPublicationPhase.Live, state.Phase);
+
+    True(NativeAttackPublication.IsCollisionObservationDue(1345, armedMain));
+    True(AttackPublicationPolicy.Observe(ref state, fake, 1345));
+    False(NativeAttackPublication.ShouldDeferNormalCleanup(1345, armedMain, true));
+    True(AttackPublicationPolicy.Cleanup(ref state, fake));
+    Equal(AttackPublicationPhase.Empty, state.Phase);
+    fake.AssertSlotCleared();
+}
+
+static void Room52ContactGeometry()
+{
+    // Live session 8c279c32: slot 80 center 192,178 and the same-floor player origin near 177,151.
+    // The former -8/10 contact band was 35 pixels above this target and could never overlap.
+    False(NativeAttackPublication.Overlaps(192, 178, 8, 8, 177 + 14, 151 - 8, 12, 10));
+    True(NativeAttackPublication.Overlaps(192, 178, 8, 8,
+        177 + NativeAttackPublication.ContactOffsetX,
+        151 + NativeAttackPublication.ContactOffsetY,
+        NativeAttackPublication.ContactHalfWidth, NativeAttackPublication.ContactHalfHeight));
 }
 
 static void ProjectileWindow()
@@ -314,6 +382,29 @@ static void TargetObservationPaths()
     foreach (TargetObserveMode mode in Enum.GetValues<TargetObserveMode>())
         ExerciseObservationFaults(1, mode);
     ExerciseObservationFaults(16, TargetObserveMode.DeadFlag);
+}
+
+static void OneShotTeardownAttribution()
+{
+    static AttackTargetObservation Observe(int targets, TargetObserveMode mode,
+        long? expBefore, long? killsBefore, long? expAfter, long? killsAfter)
+    {
+        var fake = new TargetReadFake(targets, TargetReject.None) { ObserveMode = mode };
+        var state = new AttackTargetCaptureState();
+        var input = new AttackTargetCaptureInput(100 << 16, 100 << 16, false, false,
+            10, 10, 0x20, 3, expBefore, killsBefore);
+        AttackTargetObservationPolicy.Capture(state, fake, input);
+        return AttackTargetObservationPolicy.Observe(state, fake, 3, expAfter, killsAfter);
+    }
+
+    AttackTargetObservation exact = Observe(1, TargetObserveMode.Vanished, 100, 7, 101, 8);
+    Equal(1, exact.NativeHits); Equal(1, exact.Defeated); Equal(1, exact.CausalResults);
+    True(exact.UniqueDefeat);
+    Equal(0, Observe(1, TargetObserveMode.Vanished, 100, 7, 100, 8).NativeHits);
+    Equal(0, Observe(1, TargetObserveMode.IdentityMismatch, 100, 7, 101, 8).NativeHits);
+    Equal(0, Observe(1, TargetObserveMode.NoHit, 100, 7, 101, 8).NativeHits);
+    Equal(0, Observe(2, TargetObserveMode.Vanished, 100, 7, 101, 8).NativeHits);
+    Equal(0, Observe(1, TargetObserveMode.Vanished, 100, 7, 102, 9).NativeHits);
 }
 
 static void ExerciseObservationFaults(int targets, TargetObserveMode mode)
@@ -967,7 +1058,7 @@ sealed class AllocationFreeAdapter : IAttackPublicationAdapter, IAttackTargetRea
 }
 
 enum TargetReject { None, Body, HitMismatch, Dead, Width, Height, ScreenX, ScreenY, OverlapX, OverlapY }
-enum TargetObserveMode { NoHit, IdentityMismatch, NoCooldown, HpDeath, DeadFlag }
+enum TargetObserveMode { NoHit, IdentityMismatch, NoCooldown, HpDeath, DeadFlag, Vanished }
 
 sealed class TargetReadFake : IAttackTargetReadAdapter
 {
@@ -1000,7 +1091,7 @@ sealed class TargetReadFake : IAttackTargetReadAdapter
     public ushort ReadTargetU16(uint address, uint offset)
     {
         Step(); bool configured = IsConfigured(address);
-        if (offset == 0x26) return (ushort)(configured ? 1 : 0);
+        if (offset == 0x26) return (ushort)(configured && !(_observing && ObserveMode == TargetObserveMode.Vanished) ? 1 : 0);
         if (offset == 0x3C) return configured
             ? _reject == TargetReject.Body ? (ushort)0 : _reject == TargetReject.HitMismatch ? (ushort)0x10 : (ushort)0x20
             : (ushort)0;
@@ -1020,7 +1111,8 @@ sealed class TargetReadFake : IAttackTargetReadAdapter
     public uint ReadTargetU32(uint address, uint offset)
     {
         Step(); bool configured = IsConfigured(address);
-        if (offset == 0x28) return configured ? address + 0x1000 : 0;
+        if (offset == 0x28) return configured && !(_observing && ObserveMode == TargetObserveMode.Vanished)
+            ? address + 0x1000 : 0;
         if (offset == 0x34)
             return _reject == TargetReject.Dead || _observing && ObserveMode == TargetObserveMode.DeadFlag ? 0x100U : 0;
         return 0;

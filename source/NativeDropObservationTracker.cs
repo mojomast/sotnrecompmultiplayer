@@ -35,6 +35,8 @@ public sealed class NativeDropObservationTracker
     private readonly NativeDropSlotObservation[] _after = new NativeDropSlotObservation[SlotCount];
     private readonly PendingDefeat[] _pending = new PendingDefeat[PendingCapacity];
     private bool _open;
+    private bool _causalDefeatThisWindow;
+    private bool _expRecordedThisWindow;
     private ulong _roomEpoch;
     private long? _expBefore;
     private ulong _scans, _active, _maximumActive, _prize, _equipment, _associated, _ambient;
@@ -52,6 +54,8 @@ public sealed class NativeDropObservationTracker
         _open = true;
         _roomEpoch = roomEpoch;
         _expBefore = nativeExp;
+        _causalDefeatThisWindow = false;
+        _expRecordedThisWindow = false;
         Array.Clear(_before);
         Array.Clear(_after);
     }
@@ -59,8 +63,8 @@ public sealed class NativeDropObservationTracker
     public void SetBefore(int slot, in NativeDropSlotObservation value) => Set(_before, slot, value);
     public void SetAfter(int slot, in NativeDropSlotObservation value) => Set(_after, slot, value);
 
-    // The caller supplies this only for one target defeated by an exact owned attack with both
-    // native attack-hit and per-attacker cooldown evidence in the normal engine window.
+    // The caller supplies this only for one target defeated by an exact-owned attack, proven by
+    // either retained hit/cooldown state or unique cleared-slot plus native reward evidence.
     public void RecordUniqueCausalDefeat(ulong roomEpoch, int worldX, int worldY)
     {
         if (!_open || roomEpoch != _roomEpoch) { Fault(); return; }
@@ -68,6 +72,7 @@ public sealed class NativeDropObservationTracker
         {
             if (_pending[i].Active) continue;
             _pending[i] = new PendingDefeat(true, roomEpoch, worldX, worldY, CausalWindowUpdates);
+            _causalDefeatThisWindow = true;
             return;
         }
         Bump(ref _overflow);
@@ -114,6 +119,7 @@ public sealed class NativeDropObservationTracker
         }
         _active = (ulong)active;
         if (_active > _maximumActive) _maximumActive = _active;
+        if (_causalDefeatThisWindow) ObserveExp(nativeExp);
 
         if (newDrops != 0)
         {
@@ -121,7 +127,6 @@ public sealed class NativeDropObservationTracker
             {
                 Bump(ref _associated);
                 _pending[compatiblePending] = default;
-                ObserveExp(nativeExp);
                 _ = compatibleDrop;
             }
             else if (compatiblePairs != 0)
@@ -150,6 +155,8 @@ public sealed class NativeDropObservationTracker
     public void Cancel()
     {
         _open = false;
+        _causalDefeatThisWindow = false;
+        _expRecordedThisWindow = false;
         _expBefore = null;
         Array.Clear(_before); Array.Clear(_after); Array.Clear(_pending);
     }
@@ -180,7 +187,7 @@ public sealed class NativeDropObservationTracker
         bool reward = Delta(nativeExp, out ulong delta);
         if (pickupEvidence && reward)
         {
-            Bump(ref _collections); Bump(ref _expEvents); Add(ref _expDelta, delta);
+            Bump(ref _collections); RecordExp(delta);
         }
         else if (pickupEvidence) Bump(ref _unresolved);
         else if (before.Step >= 6) Bump(ref _expirations);
@@ -190,6 +197,13 @@ public sealed class NativeDropObservationTracker
     private void ObserveExp(long? nativeExp)
     {
         if (!Delta(nativeExp, out ulong delta)) return;
+        RecordExp(delta);
+    }
+
+    private void RecordExp(ulong delta)
+    {
+        if (_expRecordedThisWindow) return;
+        _expRecordedThisWindow = true;
         Bump(ref _expEvents); Add(ref _expDelta, delta);
     }
 

@@ -23,12 +23,16 @@ public readonly struct AttackTargetCaptureInput
     public readonly byte HalfHeight;
     public readonly ushort HitState;
     public readonly int AttackerId;
+    public readonly long? NativeExp;
+    public readonly long? NativeKills;
 
     public AttackTargetCaptureInput(int worldX, int worldY, bool projectile, bool facingLeft,
-        byte halfWidth, byte halfHeight, ushort hitState, int attackerId)
+        byte halfWidth, byte halfHeight, ushort hitState, int attackerId,
+        long? nativeExp = null, long? nativeKills = null)
     {
         WorldX = worldX; WorldY = worldY; Projectile = projectile; FacingLeft = facingLeft;
         HalfWidth = halfWidth; HalfHeight = halfHeight; HitState = hitState; AttackerId = attackerId;
+        NativeExp = nativeExp; NativeKills = nativeKills;
     }
 }
 
@@ -42,11 +46,14 @@ public sealed class AttackTargetCaptureState
     internal readonly int[] WorldY = new int[16];
     public int Count { get; internal set; }
     public bool Overflowed { get; internal set; }
+    internal long? NativeExpBefore;
+    internal long? NativeKillsBefore;
 
     public void Clear()
     {
         Count = 0;
         Overflowed = false;
+        NativeExpBefore = NativeKillsBefore = null;
         Array.Clear(Addresses); Array.Clear(Identities); Array.Clear(HpBefore); Array.Clear(CooldownBefore);
         Array.Clear(WorldX); Array.Clear(WorldY);
     }
@@ -87,14 +94,17 @@ public static class AttackTargetObservationPolicy
     {
         state.Count = 0;
         state.Overflowed = false;
+        state.NativeExpBefore = input.NativeExp;
+        state.NativeKillsBefore = input.NativeKills;
         int scrollX = adapter.ReadScrollX();
         int scrollY = adapter.ReadScrollY();
         int attackX = input.Projectile
             ? (input.WorldX >> 16) - scrollX
-            : (input.WorldX >> 16) - scrollX + (input.FacingLeft ? -14 : 14);
+            : (input.WorldX >> 16) - scrollX + (input.FacingLeft
+                ? -NativeAttackPublication.ContactOffsetX : NativeAttackPublication.ContactOffsetX);
         int attackY = input.Projectile
             ? (input.WorldY >> 16) - scrollY
-            : (input.WorldY >> 16) - scrollY - 8;
+            : (input.WorldY >> 16) - scrollY + NativeAttackPublication.ContactOffsetY;
 
         for (int slot = 64; slot < 192; slot++)
         {
@@ -115,8 +125,8 @@ public static class AttackTargetObservationPolicy
             int offsetY = unchecked((short)adapter.ReadTargetU16(address, 0x12));
             int centerY = positionY + offsetY;
             if (centerX is <= -32 or >= 288 || centerY is <= -32 or >= 256) continue;
-            if (Math.Abs(centerX - attackX) >= width + input.HalfWidth ||
-                Math.Abs(centerY - attackY) >= height + input.HalfHeight) continue;
+            if (!NativeAttackPublication.Overlaps(centerX, centerY, width, height,
+                attackX, attackY, input.HalfWidth, input.HalfHeight)) continue;
             ushort enemyId = adapter.ReadTargetU16(address, 0x3A);
             short hp = unchecked((short)adapter.ReadTargetU16(address, 0x3E));
             byte cooldown = adapter.ReadTargetU8(address, 0x6D + (uint)input.AttackerId);
@@ -136,11 +146,13 @@ public static class AttackTargetObservationPolicy
     }
 
     public static AttackTargetObservation Observe(AttackTargetCaptureState state,
-        IAttackTargetReadAdapter adapter, int attackerId)
+        IAttackTargetReadAdapter adapter, int attackerId, long? nativeExp = null,
+        long? nativeKills = null)
     {
         bool hitFlag = adapter.ReadAttackU8(0x48) != 0;
         bool anyCooldown = false;
         int hpChanges = 0, cooldownChanges = 0, nativeHits = 0, defeated = 0, zeroHp = 0;
+        int cleared = 0;
         int defeatX = 0, defeatY = 0;
         for (int index = 0; index < state.Count; index++)
         {
@@ -149,7 +161,15 @@ public static class AttackTargetObservationPolicy
             ushort id = adapter.ReadTargetU16(address, 0x26);
             ushort enemyId = adapter.ReadTargetU16(address, 0x3A);
             ulong identity = ((ulong)update << 32) | ((ulong)enemyId << 16) | id;
-            if (identity != state.Identities[index]) continue;
+            if (identity != state.Identities[index])
+            {
+                if (id == 0 && update == 0)
+                {
+                    cleared++;
+                    defeatX = state.WorldX[index]; defeatY = state.WorldY[index];
+                }
+                continue;
+            }
             short hpAfter = unchecked((short)adapter.ReadTargetU16(address, 0x3E));
             if (hpAfter < state.HpBefore[index]) hpChanges++;
             byte cooldown = adapter.ReadTargetU8(address, 0x6D + (uint)attackerId);
@@ -166,9 +186,19 @@ public static class AttackTargetObservationPolicy
             }
             if (state.HpBefore[index] <= 0 || hpAfter <= 0) zeroHp++;
         }
+        bool exactReward = state.NativeExpBefore is long expBefore && nativeExp is long expAfter &&
+            expAfter > expBefore && state.NativeKillsBefore is long killsBefore &&
+            nativeKills is long killsAfter && killsAfter == killsBefore + 1;
+        bool rewardedTeardown = state.Count == 1 && !state.Overflowed && cleared == 1 && exactReward;
+        if (rewardedTeardown)
+        {
+            hpChanges++; nativeHits++; defeated++;
+        }
         bool uniqueDefeat = !state.Overflowed && hitFlag && anyCooldown && defeated == 1 && nativeHits == 1;
+        uniqueDefeat |= rewardedTeardown;
         return new AttackTargetObservation(hitFlag, hpChanges, cooldownChanges, nativeHits,
-            defeated, zeroHp, hitFlag && anyCooldown ? 1 : 0, uniqueDefeat, defeatX, defeatY,
+            defeated, zeroHp, hitFlag && anyCooldown || rewardedTeardown ? 1 : 0,
+            uniqueDefeat, defeatX, defeatY,
             state.Overflowed);
     }
 }

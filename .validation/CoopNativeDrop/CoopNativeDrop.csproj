@@ -4,5 +4,5 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
-  <ItemGroup><Compile Include="../../source/NativeDropObservationTracker.cs" Link="NativeDropObservationTracker.cs" /><Compile Include="Program.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="../../source/NativeDropObservationTracker.cs" Link="NativeDropObservationTracker.cs" /><Compile Include="../../source/NativeExpObservation.cs" Link="NativeExpObservation.cs" /><Compile Include="Program.cs" /></ItemGroup>
 </Project>
