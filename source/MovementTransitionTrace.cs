@@ -10,9 +10,11 @@ public enum MovementTransitionTraceSource : byte
     Recovery,
     Reconstruction,
     Retry,
-    PlayerLoaded,
+    SaveLoaded,
     BootstrapLayer,
     BootstrapSafe,
+    BootstrapSample,
+    BootstrapClosed,
 }
 
 // Fixed-size lifecycle evidence for diagnosing transition ordering without retaining gameplay history.

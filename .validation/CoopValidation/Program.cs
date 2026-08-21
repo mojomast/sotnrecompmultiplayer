@@ -291,8 +291,19 @@ internal static partial class Program
         if (retryGate < 0 || roomObservation <= retryGate || reconstructionCall <= roomObservation)
             throw new InvalidOperationException("Reconstruction retry suppression must precede session attempts and native probes.");
 
-        ValidateOrdering(source, "private void OnPlayerLoaded(", "private void OnRoomLayerLoaded(",
+        ValidateOrdering(source, "private void OnPlayerLoaded(", "private void OnSaveLoaded(",
             ["_movementSession.PlayerReloaded();", "_locomotionState.Invalidate();", "ResetManagedHealth();"]);
+        if (!source.Contains("Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);", StringComparison.Ordinal) ||
+            source.Contains("_nativeLoadBootstrap.Arm(beforeReload", StringComparison.Ordinal) ||
+            !source.Contains("private void OnSaveLoaded(SaveLoadedEvent e)", StringComparison.Ordinal) ||
+            !source.Contains("_nativeLoadBootstrap.Arm();", StringComparison.Ordinal) ||
+            source.Contains("e.Block", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native load bootstrap must arm only from SaveLoadedEvent.");
+        if (!source.Contains("IsNativeLoadQualifyingPostUpdate(memory)", StringComparison.Ordinal) ||
+            !source.Contains("_nativeLoadBootstrap.Stable", StringComparison.Ordinal) ||
+            !source.Contains("memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default", StringComparison.Ordinal) ||
+            !source.Contains("memory.ReadU32(EngineStepAddress) == 1", StringComparison.Ordinal))
+            throw new InvalidOperationException("Native load bootstrap must gate baseline and reconstruction on stable post-update Play samples.");
         ValidateOrdering(source, "private void OnRoomLayerLoaded(", "[PostHook(\"dra\", \"RunMainEngine\")]",
             ["BeginTransition();", "_movementSession.RoomLayerLoaded();"]);
         if (!source.Contains("if (_nativeLoadBootstrap.Armed)", StringComparison.Ordinal) ||

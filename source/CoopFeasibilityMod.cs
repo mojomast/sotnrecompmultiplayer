@@ -591,6 +591,7 @@ public sealed class CoopFeasibility : IMod
         Event.AddListener<VSyncEvent>(OnVSync);
         Event.AddListener<PadReadEvent>(OnPadRead);
         Event.AddListener<PlayerLoadedEvent>(OnPlayerLoaded);
+        Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);
         Event.AddListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
         ResetManagedHealth();
         Console.WriteLine($"[CoopProbe] Loaded v{Version}; target SymphonyRecomp v0.4.3b");
@@ -611,8 +612,10 @@ public sealed class CoopFeasibility : IMod
             Event.RemoveListener<VSyncEvent>(OnVSync);
             Event.RemoveListener<PadReadEvent>(OnPadRead);
             Event.RemoveListener<PlayerLoadedEvent>(OnPlayerLoaded);
+            Event.RemoveListener<SaveLoadedEvent>(OnSaveLoaded);
             Event.RemoveListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
             _movementSession.Unload();
+            CloseNativeLoadBootstrap("UNLOAD");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _locomotionState.Invalidate();
             DisarmAwareness("UNLOAD");
@@ -914,11 +917,8 @@ public sealed class CoopFeasibility : IMod
             CancelAutomaticTest("player reloaded");
             ReleaseVirtualKeys();
             _pad2Source.Reset();
-            ManagedMovementSessionState beforeReload = _movementSession.State;
             _movementSession.PlayerReloaded();
-            if (beforeReload.RoomKnown) _nativeLoadBootstrap.Arm(beforeReload.Room);
-            else _nativeLoadBootstrap.Arm();
-            TraceTransition(MovementTransitionTraceSource.PlayerLoaded, default, "armed", "none");
+            CloseNativeLoadBootstrap("PLAYER_LOADED");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
@@ -942,6 +942,21 @@ public sealed class CoopFeasibility : IMod
         catch (Exception ex)
         {
             Fail("PlayerLoaded event", ex);
+        }
+    }
+
+    private void OnSaveLoaded(SaveLoadedEvent e)
+    {
+        try
+        {
+            _nativeLoadBootstrap.Arm();
+            _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
+            _reconstructionTriggerReason = TetherReason.Reconstruction;
+            TraceTransition(MovementTransitionTraceSource.SaveLoaded, default, "armed:event-redacted", "none");
+        }
+        catch (Exception ex)
+        {
+            Fail("SaveLoaded event", ex);
         }
     }
 
@@ -1170,6 +1185,8 @@ public sealed class CoopFeasibility : IMod
         }
         if (!_enabled || !_safeFrame)
         {
+            _nativeLoadBootstrap.ObserveNonQualifyingPostUpdate();
+            CloseNativeLoadBootstrapIfTerminal();
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
                 _fatal ? TetherLifecycle.Fatal : TetherLifecycle.Inactive,
                 CurrentUnsafeTetherReason()));
@@ -1185,7 +1202,12 @@ public sealed class CoopFeasibility : IMod
         }
 
         RoomIdentity observedRoom = ReadRoomIdentity(memory);
-        bool bootstrapBaseline = _nativeLoadBootstrap.ConsumeSafeBaseline();
+        bool bootstrapSample = IsNativeLoadQualifyingPostUpdate(memory);
+        bool bootstrapBaseline = bootstrapSample && _nativeLoadBootstrap.ObserveQualifyingPostUpdate() &&
+            _nativeLoadBootstrap.ConsumeSafeBaseline();
+        if (_nativeLoadBootstrap.Armed && bootstrapSample)
+            TraceTransition(MovementTransitionTraceSource.BootstrapSample, observedRoom.ManagedKey(),
+                $"qualifying:{_nativeLoadBootstrap.ConsecutiveQualifyingSamples}", "none");
         bool bootstrapRebaseline = _nativeLoadBootstrap.Armed && !bootstrapBaseline &&
             _roomKnown && !_room.Equals(observedRoom);
         if (bootstrapRebaseline)
@@ -1230,6 +1252,8 @@ public sealed class CoopFeasibility : IMod
             beforeMovement.CompletedTransitions != movement.State.CompletedTransitions)
             TraceTransition(bootstrapBaseline ? MovementTransitionTraceSource.BootstrapSafe : MovementTransitionTraceSource.SafeRoom, observedRoom.ManagedKey(),
                 movement.ReconstructionRequested ? "requested" : "none", retryProbe ? "retry" : "none");
+        if (_nativeLoadBootstrap.Armed && !_nativeLoadBootstrap.Stable)
+            return;
         if (roomChanged)
         {
             _locomotionState.Invalidate();
@@ -1269,6 +1293,9 @@ public sealed class CoopFeasibility : IMod
             }
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
+            if (bootstrapClosed)
+                TraceTransition(MovementTransitionTraceSource.BootstrapClosed, observedRoom.ManagedKey(),
+                    "RECONSTRUCTED", "none");
             TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
                 bootstrapClosed ? "Selected:bootstrap-closed-post-load-identity" : reconstruction.ToString(),
                 "cleared");
@@ -2925,6 +2952,23 @@ public sealed class CoopFeasibility : IMod
             _movementSession.State, current, reconstruction, retry, _nativeLoadBootstrap.Phase,
             layerStage, layerIndex);
 
+    private bool IsNativeLoadQualifyingPostUpdate(IMemory memory) =>
+        _safeFrame && Game.Available && Game.InGame && !Game.IsLoading && !Game.MenuOpen && !Game.MapOpen &&
+        DisplayModeHooks.IsStage && memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default &&
+        memory.ReadU32(EngineStepAddress) == 1 && memory.ReadU32(CutsceneControlAddress) == 0;
+
+    private void CloseNativeLoadBootstrapIfTerminal()
+    {
+        if (!Game.Available || !Game.InGame) CloseNativeLoadBootstrap("NON_PLAY");
+        else if (Game.MenuOpen || Game.MapOpen) CloseNativeLoadBootstrap("MENU_MAP");
+    }
+
+    private void CloseNativeLoadBootstrap(string reason)
+    {
+        if (_nativeLoadBootstrap.Close())
+            TraceTransition(MovementTransitionTraceSource.BootstrapClosed, _movementSession.State.Room, reason, "none");
+    }
+
     private static int AnimationFrameCount(ManagedAnimation animation) =>
         ManagedLocomotionCatalog.FrameCount(animation);
 
@@ -3751,6 +3795,7 @@ public sealed class CoopFeasibility : IMod
         if (!DiagnosticResetPreparationPolicy.CommitPreparedReducers(preparation, attackPreflight,
             ref _attackLease, _movementSession, _jumpForgiveness, _stance, _locomotionState,
             _reconstructionPolicy)) return false;
+        CloseNativeLoadBootstrap("DIAGNOSTIC_RESET");
         bool cleanupQuarantined = _attackQuarantineSlot >= 0;
         _diagnosticGeneration = preparation.NextDiagnosticGeneration;
         _fatal = false;
@@ -3918,6 +3963,7 @@ public sealed class CoopFeasibility : IMod
         }
         catch { /* Preserve the original circuit-breaker evidence on diagnostic exhaustion. */ }
         _movementSession.Fatal();
+        CloseNativeLoadBootstrap("FATAL");
         _reconstructionRetry = ReconstructionRetryPolicy.TerminalFault(
             _reconstructionRetry, TetherReason.Fatal);
         _locomotionState.Invalidate();

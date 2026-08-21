@@ -7,7 +7,6 @@ public enum NativeLoadBootstrapPhase : byte
     Closed,
     Armed,
     BaselineObserved,
-    ProvisionalSelected,
     Suspended,
 }
 
@@ -15,52 +14,62 @@ public sealed class NativeLoadBootstrapState
 {
     public NativeLoadBootstrapPhase Phase { get; private set; }
     public bool Armed => Phase != NativeLoadBootstrapPhase.Closed;
-    private bool _preLoadRoomKnown;
-    private ManagedRoomKey _preLoadRoom;
+    public int ConsecutiveQualifyingSamples { get; private set; }
+    public bool Stable => ConsecutiveQualifyingSamples >= RequiredQualifyingSamples;
+    public const int RequiredQualifyingSamples = 2;
 
     public void Arm()
     {
-        _preLoadRoomKnown = false;
+        ConsecutiveQualifyingSamples = 0;
         Phase = NativeLoadBootstrapPhase.Armed;
     }
 
-    public void Arm(ManagedRoomKey preLoadRoom)
+    // Returns true when consecutive post-update samples make baseline and reconstruction eligible.
+    public bool ObserveQualifyingPostUpdate()
     {
-        _preLoadRoom = preLoadRoom;
-        _preLoadRoomKnown = true;
-        Phase = NativeLoadBootstrapPhase.Armed;
+        if (!Armed) return false;
+        if (ConsecutiveQualifyingSamples < RequiredQualifyingSamples) ConsecutiveQualifyingSamples++;
+        return Phase == NativeLoadBootstrapPhase.Armed && Stable;
     }
 
-    // True exactly once per load, when the first fully-gated post-update room becomes the
+    public void ObserveNonQualifyingPostUpdate()
+    {
+        if (!Armed) return;
+        ConsecutiveQualifyingSamples = 0;
+        if (Phase == NativeLoadBootstrapPhase.BaselineObserved) Phase = NativeLoadBootstrapPhase.Armed;
+    }
+
+    // True exactly once per load, when a fully-gated post-update room becomes the
     // reducer baseline rather than evidence of a transition.
     public bool ConsumeSafeBaseline()
     {
-        if (Phase != NativeLoadBootstrapPhase.Armed) return false;
+        if (Phase != NativeLoadBootstrapPhase.Armed || !Stable) return false;
         Phase = NativeLoadBootstrapPhase.BaselineObserved;
         return true;
     }
 
-    // A selection of the room retained across PlayerLoaded is provisional: the engine can still
-    // publish that stale identity before the destination room. Selection otherwise proves the
-    // reducer's fully-gated stabilization of the post-load identity.
     public bool CompleteReconstruction(ManagedMovementReconstructionResult result,
         ManagedRoomKey reconstructedRoom)
     {
-        if (!Armed) return false;
+        if (!Armed || !Stable) return false;
         if (result != ManagedMovementReconstructionResult.Selected)
         {
             Phase = NativeLoadBootstrapPhase.Suspended;
             return false;
         }
-        if (_preLoadRoomKnown && _preLoadRoom.SameRoomAs(reconstructedRoom))
-        {
-            Phase = NativeLoadBootstrapPhase.ProvisionalSelected;
-            return false;
-        }
         Phase = NativeLoadBootstrapPhase.Closed;
+        ConsecutiveQualifyingSamples = 0;
         return true;
     }
 
     public bool CompleteReconstruction(ManagedMovementReconstructionResult result) =>
         CompleteReconstruction(result, default);
+
+    public bool Close()
+    {
+        if (!Armed) return false;
+        ConsecutiveQualifyingSamples = 0;
+        Phase = NativeLoadBootstrapPhase.Closed;
+        return true;
+    }
 }
