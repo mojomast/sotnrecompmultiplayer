@@ -27,6 +27,7 @@ internal static partial class Program
         "PostHook:cen:GetDistanceToPlayerX_cen",
         "PostHook:cen:GetDistanceToPlayerY_cen",
         "PostHook:cen:GetSideToPlayer_cen",
+        "PostHook:dra:ApplySaveData_dra",
         "PostHook:dra:RenderEntities",
         "PostHook:dra:RunMainEngine",
         "PostHook:dra:UpdatePlayerEntities",
@@ -72,7 +73,7 @@ internal static partial class Program
             string version = ValidateManifest(manifestText);
             ValidateSource(sourceText, version);
             ValidateHostContracts(hostRoot);
-            ValidateFileSelectPostHook();
+            ValidateSaveDataPostHooks();
             RunNegativeContractTests(manifestText, sourceText, version, hostRoot);
             ValidateGeneratedDiagnostics();
             ValidateGuardedDirectDispatch();
@@ -299,13 +300,18 @@ internal static partial class Program
         if (!source.Contains("Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);", StringComparison.Ordinal) ||
             source.Contains("_nativeLoadBootstrap.Arm(beforeReload", StringComparison.Ordinal) ||
             !source.Contains("private void OnSaveLoaded(SaveLoadedEvent e)", StringComparison.Ordinal) ||
+            !source.Contains("private const uint NativeLoadApplySaveDataReturn = 0x800F31DC;", StringComparison.Ordinal) ||
+            !source.Contains("[PostHook(\"dra\", \"ApplySaveData_dra\")]", StringComparison.Ordinal) ||
+            !source.Contains("private static void AfterNativeApplySaveData(CpuContext context, IMemory memory)", StringComparison.Ordinal) ||
+            !source.Contains("context.RA != NativeLoadApplySaveDataReturn || context.V0 != 0", StringComparison.Ordinal) ||
+            !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded,\n                \"armed:dra-post target=redacted caller=redacted result=redacted\")", StringComparison.Ordinal) ||
             !source.Contains("[PostHook(\"sel\", \"ApplySaveData_sel\")]", StringComparison.Ordinal) ||
             !source.Contains("private static void AfterFileSelectApplySaveData(CpuContext context, IMemory memory)", StringComparison.Ordinal) ||
             !source.Contains("if (context.V0 != 0) return;", StringComparison.Ordinal) ||
             !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"armed:sel-post\")", StringComparison.Ordinal) ||
             !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"event-supplementary\")", StringComparison.Ordinal) ||
             source.Contains("e.Block", StringComparison.Ordinal))
-            throw new InvalidOperationException("Native load bootstrap must use the direct file-select post-hook with SaveLoadedEvent supplementary only.");
+            throw new InvalidOperationException("Native load bootstrap must use the gated DRA and file-select post-hooks with SaveLoadedEvent supplementary only.");
         if (!source.Contains("IsNativeLoadQualifyingPostUpdate(memory)", StringComparison.Ordinal) ||
             !source.Contains("_nativeLoadBootstrap.Stable", StringComparison.Ordinal) ||
             !source.Contains("memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default", StringComparison.Ordinal) ||
@@ -466,21 +472,33 @@ internal static partial class Program
         Console.WriteLine($"[CoopValidation] Extraction dispatch evidence: scratch={length}, guest-throw-restored=true, warmed-calls=10000, bytes={allocated}.");
     }
 
+    private const uint NativeLoadApplySaveDataReturn = 0x800F31DC;
     private static int _fileSelectOriginalCalls;
     private static int _fileSelectPostCalls;
     private static bool _fileSelectSuccessResultObserved;
+    private static int _draOriginalCalls;
+    private static int _draPostCalls;
+    private static uint _draOriginalResult;
+    private static bool _draBootstrapArmed;
 
-    private static void ValidateFileSelectPostHook()
+    private static void ValidateSaveDataPostHooks()
     {
         Dispatcher.Register("sel", new FileSelectProbeOverlay());
+        Dispatcher.Register("dra", new DraProbeOverlay());
         SymbolRegistry.Build();
-        MethodInfo target = SymbolRegistry.Resolve("sel", "ApplySaveData_sel", 0)
+        MethodInfo fileSelectTarget = SymbolRegistry.Resolve("sel", "ApplySaveData_sel", 0)
             ?? throw new InvalidOperationException("HookManager could not resolve sel/ApplySaveData_sel.");
-        MethodInfo post = typeof(Program).GetMethod(nameof(AfterFileSelectApplyProbe),
+        MethodInfo draTarget = SymbolRegistry.Resolve("dra", "ApplySaveData_dra", 0)
+            ?? throw new InvalidOperationException("HookManager could not resolve dra/ApplySaveData_dra.");
+        MethodInfo fileSelectPost = typeof(Program).GetMethod(nameof(AfterFileSelectApplyProbe),
             BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("File-select post-hook probe is missing.");
-        var mod = new ModInfo { Id = "coop-validation-file-select" };
-        if (!HookManager.AddPost(mod, target, post))
+        MethodInfo draPost = typeof(Program).GetMethod(nameof(AfterDraApplyProbe),
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DRA post-hook probe is missing.");
+        var mod = new ModInfo { Id = "coop-validation-save-data" };
+        if (!HookManager.AddPost(mod, fileSelectTarget, fileSelectPost) ||
+            !HookManager.AddPost(mod, draTarget, draPost))
             throw new InvalidOperationException("HookManager rejected the file-select post-hook signature.");
 
         try
@@ -492,13 +510,31 @@ internal static partial class Program
             FileSelectProbeOverlay.ApplySaveData_sel(new CpuContext(), new FaultMemory(1));
             if (_fileSelectOriginalCalls != 1 || _fileSelectPostCalls != 1 || !_fileSelectSuccessResultObserved)
                 throw new InvalidOperationException("File-select post-hook did not run after the successful original apply function.");
+
+            _draOriginalCalls = 0;
+            _draPostCalls = 0;
+            _draOriginalResult = 0;
+            _draBootstrapArmed = false;
+            DraProbeOverlay.ApplySaveData_dra(new CpuContext { RA = NativeLoadApplySaveDataReturn }, new FaultMemory(1));
+            if (_draOriginalCalls != 1 || _draPostCalls != 1 || !_draBootstrapArmed)
+                throw new InvalidOperationException("DRA post-hook did not arm for the verified successful native load call.");
+
+            _draBootstrapArmed = false;
+            DraProbeOverlay.ApplySaveData_dra(new CpuContext { RA = NativeLoadApplySaveDataReturn + 4 }, new FaultMemory(1));
+            if (_draBootstrapArmed)
+                throw new InvalidOperationException("DRA post-hook armed for an unverified ApplySaveData caller.");
+
+            _draOriginalResult = 1;
+            DraProbeOverlay.ApplySaveData_dra(new CpuContext { RA = NativeLoadApplySaveDataReturn }, new FaultMemory(1));
+            if (_draBootstrapArmed)
+                throw new InvalidOperationException("DRA post-hook armed after a failed ApplySaveData result.");
         }
         finally
         {
             HookManager.RemoveMod(mod);
         }
 
-        Console.WriteLine("[CoopValidation] File-select post-hook evidence: sel/ApplySaveData_sel resolved, successful-original-then-post=true.");
+        Console.WriteLine("[CoopValidation] Save-data post-hook evidence: sel/ApplySaveData_sel and dra/ApplySaveData_dra resolved, DRA caller-and-success-gate=true.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -512,6 +548,12 @@ internal static partial class Program
     {
         _fileSelectPostCalls++;
         _fileSelectSuccessResultObserved = context.V0 == 0;
+    }
+
+    private static void AfterDraApplyProbe(CpuContext context, IMemory memory)
+    {
+        _draPostCalls++;
+        if (context.RA == NativeLoadApplySaveDataReturn && context.V0 == 0) _draBootstrapArmed = true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -665,6 +707,22 @@ internal static partial class Program
         }
     }
 
+    private sealed class DraProbeOverlay : IOverlay
+    {
+        private static readonly IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> DraFunctions =
+            new Dictionary<uint, Action<CpuContext, IMemory>> { [0x801FF008] = ApplySaveData_dra };
+
+        public string Name => "dra";
+        public IReadOnlyDictionary<uint, Action<CpuContext, IMemory>> Functions => DraFunctions;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void ApplySaveData_dra(CpuContext context, IMemory memory)
+        {
+            _draOriginalCalls++;
+            context.V0 = _draOriginalResult;
+        }
+    }
+
     private sealed class FaultMemory : IMemory
     {
         internal readonly byte[] Bytes;
@@ -730,7 +788,7 @@ internal static partial class Program
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "main.json")),
             "main", ["DrawOTag"]);
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "dra.json")),
-            "dra", ["RenderEntities", "RunMainEngine", "UpdatePlayerEntities"]);
+            "dra", ["ApplySaveData", "RenderEntities", "RunMainEngine", "UpdatePlayerEntities"]);
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "stsel.json")),
             "sel", ["ApplySaveData"]);
         ValidateFunctionMap(File.ReadAllText(Path.Combine(hostRoot, "config", "funcmaps", "stcen.json")),
@@ -767,6 +825,7 @@ internal static partial class Program
             [("dra", "RenderEntities")] = "RenderEntities",
             [("dra", "RunMainEngine")] = "RunMainEngine",
             [("dra", "UpdatePlayerEntities")] = "UpdatePlayerEntities",
+            [("dra", "ApplySaveData")] = "ApplySaveData_dra",
             [("sel", "ApplySaveData")] = "ApplySaveData_sel",
             [("cen", "GetDistanceToPlayerX")] = "GetDistanceToPlayerX_cen",
             [("cen", "GetDistanceToPlayerY")] = "GetDistanceToPlayerY_cen",

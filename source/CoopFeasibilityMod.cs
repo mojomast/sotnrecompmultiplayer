@@ -957,6 +957,22 @@ public sealed class CoopFeasibility : IMod
         }
     }
 
+    private const uint NativeLoadApplySaveDataReturn = 0x800F31DC;
+
+    [PostHook("dra", "ApplySaveData_dra")]
+    private static void AfterNativeApplySaveData(CpuContext context, IMemory memory)
+    {
+        CoopFeasibility? mod = _instance;
+        if (mod == null) return;
+        if (context.RA != NativeLoadApplySaveDataReturn || context.V0 != 0) return;
+        try
+        {
+            mod.ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded,
+                "armed:dra-post target=redacted caller=redacted result=redacted");
+        }
+        catch (Exception ex) { mod.Fail("native ApplySaveData hook", ex); }
+    }
+
     [PostHook("sel", "ApplySaveData_sel")]
     private static void AfterFileSelectApplySaveData(CpuContext context, IMemory memory)
     {
