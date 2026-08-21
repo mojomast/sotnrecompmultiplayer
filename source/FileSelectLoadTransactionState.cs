@@ -115,21 +115,16 @@ public sealed class FileSelectLoadTransactionState
             return Cancel(FileSelectLoadTransactionReason.IncompatibleState);
         }
 
-        if (observation.GameStateRaw == PlayState)
+        if (IsFullyNormalPlay(observation))
         {
             Phase = FileSelectLoadTransactionPhase.PlayObserved;
             return default;
         }
-        if (observation.GameStateRaw == NowLoadingState) return default;
-        if (IsSelectedSaveProgression(observation)) return default;
         if (observation.GameStateRaw == TitleState)
             return Cancel(FileSelectLoadTransactionReason.ReturnedToTitle);
         if (IsMainMenuIdle(observation))
             return Cancel(FileSelectLoadTransactionReason.ReturnedToMainMenuIdle);
-        if (observation.GameStateRaw == MainMenuState)
-            return Cancel(FileSelectLoadTransactionReason.IncompatibleState);
-        if (observation.Loading) return default;
-        return Cancel(FileSelectLoadTransactionReason.IncompatibleState);
+        return default;
     }
 
     public FileSelectLoadTransactionTransition Cancel(FileSelectLoadTransactionReason reason)

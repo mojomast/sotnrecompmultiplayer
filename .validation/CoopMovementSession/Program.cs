@@ -19,6 +19,109 @@ var tests = new List<(string Name, Action Run)>
         Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
         True(transaction.BootstrapArmed);
     }),
+    ("armed transaction tolerates arbitrary intermediate states until normal Play", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(FileSelect());
+        transaction.Observe(Observation(8, 6, 0x100));
+
+        FileSelectLoadObservation[] intermediate =
+        [
+            Observation(7, 19, 0x407),
+            Observation(2, 4, 0x12, loading: true),
+            Observation(13, 0, 0),
+        ];
+        foreach (FileSelectLoadObservation observation in intermediate)
+        {
+            FileSelectLoadTransactionTransition waiting = transaction.Observe(observation);
+            False(waiting.Has(FileSelectLoadTransactionAction.Cancel));
+            Equal(FileSelectLoadTransactionPhase.ArmedAwaitingPlay, transaction.Phase);
+        }
+
+        transaction.Observe(Observation(2, 3, 1));
+        Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
+    }),
+    ("armed transaction tolerates multiple loading pipeline states", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(FileSelect());
+        transaction.Observe(Observation(8, 6, 0x100));
+
+        FileSelectLoadObservation[] loadingPipeline =
+        [
+            Observation(8, 6, 0x101),
+            Observation(8, 6, 0x104),
+            Observation(4, 6, 0x104, loading: true),
+            Observation(5, 0x20, 0x200, loading: true),
+            Observation(2, 3, 1, loading: true),
+        ];
+        foreach (FileSelectLoadObservation observation in loadingPipeline)
+        {
+            False(transaction.Observe(observation).Has(FileSelectLoadTransactionAction.Cancel));
+            Equal(FileSelectLoadTransactionPhase.ArmedAwaitingPlay, transaction.Phase);
+        }
+
+        transaction.Observe(Observation(2, 3, 1));
+        Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
+    }),
+    ("armed transaction cancels explicit terminal states", () =>
+    {
+        (FileSelectLoadObservation Observation, FileSelectLoadTransactionReason Reason)[] terminals =
+        [
+            (Observation(1, 0, 0), FileSelectLoadTransactionReason.ReturnedToTitle),
+            (Observation(8, 6, 2), FileSelectLoadTransactionReason.ReturnedToMainMenuIdle),
+        ];
+        foreach ((FileSelectLoadObservation observation, FileSelectLoadTransactionReason reason) in terminals)
+        {
+            var transaction = new FileSelectLoadTransactionState();
+            transaction.Observe(FileSelect());
+            transaction.Observe(Observation(8, 6, 0x100));
+
+            FileSelectLoadTransactionTransition cancel = transaction.Observe(observation);
+
+            True(cancel.Has(FileSelectLoadTransactionAction.Cancel));
+            True(cancel.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+            Equal(reason, cancel.Reason);
+            Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+        }
+    }),
+    ("armed transaction accepts external lifecycle cancellation", () =>
+    {
+        FileSelectLoadTransactionReason[] reasons =
+        [
+            FileSelectLoadTransactionReason.Fatal,
+            FileSelectLoadTransactionReason.Unload,
+            FileSelectLoadTransactionReason.DiagnosticReset,
+        ];
+        foreach (FileSelectLoadTransactionReason reason in reasons)
+        {
+            var transaction = new FileSelectLoadTransactionState();
+            transaction.Observe(FileSelect());
+            transaction.Observe(Observation(8, 6, 0x100));
+
+            FileSelectLoadTransactionTransition cancel = transaction.Cancel(reason);
+
+            True(cancel.Has(FileSelectLoadTransactionAction.Cancel));
+            True(cancel.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+            Equal(reason, cancel.Reason);
+            Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+        }
+    }),
+    ("armed transaction times out across intermediate states", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState(4);
+        transaction.Observe(FileSelect());
+        transaction.Observe(Observation(8, 6, 0x100));
+        False(transaction.Observe(Observation(7, 10, 20)).Has(FileSelectLoadTransactionAction.Cancel));
+        False(transaction.Observe(Observation(5, 30, 40, loading: true)).Has(FileSelectLoadTransactionAction.Cancel));
+
+        FileSelectLoadTransactionTransition timeout = transaction.Observe(Observation(6, 50, 60));
+
+        True(timeout.Has(FileSelectLoadTransactionAction.Cancel));
+        True(timeout.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+        Equal(FileSelectLoadTransactionReason.Timeout, timeout.Reason);
+        Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+    }),
     ("occupied save live direct edge arms and observes fully normal Play", () =>
     {
         var transaction = new FileSelectLoadTransactionState();
