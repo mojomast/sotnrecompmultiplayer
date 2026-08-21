@@ -54,6 +54,19 @@ var tests = new List<(string Name, Action Run)>
         Equal((int)NativeLoadBootstrapPhase.Closed, entry.GetProperty("bootstrapPhase").GetInt32());
         Equal(-1, entry.GetProperty("layerStage").GetInt32());
         Equal((int)ManagedMovementSessionPhase.Dormant, entry.GetProperty("reducerPhase").GetInt32());
+
+        var fileSelectTrace = new[]
+        {
+            new MovementTransitionTraceEntry(124, MovementTransitionTraceSource.FileSelectCancel,
+                origin, current, false, false, "Timeout", "none")
+        };
+        string fileSelectJson = P2D4DiagnosticsEnvelope.Serialize(P2D4Report.Parse(Golden),
+            new string('a', 32), 0, 30, 40, EmptyMetrics(), fileSelectTrace);
+        using JsonDocument fileSelectDocument = JsonDocument.Parse(fileSelectJson);
+        JsonElement fileSelectEntry = fileSelectDocument.RootElement.GetProperty("transitionTrace")[0];
+        Equal((int)MovementTransitionTraceSource.FileSelectCancel,
+            fileSelectEntry.GetProperty("eventSource").GetInt32());
+        Equal("Timeout", fileSelectEntry.GetProperty("reconstruction").GetString());
     }),
     ("envelope generation mismatch rejected", () => RejectEnvelope(1)),
     ("duplicate key rejected", () => Reject(Golden.Replace(" H=W:0/0/0/0/0", " H=W:0/0/0/0/0 H=W:0/0/0/0/0"))),

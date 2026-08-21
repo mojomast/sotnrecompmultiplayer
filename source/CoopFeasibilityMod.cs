@@ -150,6 +150,7 @@ public sealed class CoopFeasibility : IMod
     private long _diagnosticFrame;
     private readonly MovementTransitionTrace _transitionTrace = new();
     private readonly NativeLoadBootstrapState _nativeLoadBootstrap = new();
+    private readonly FileSelectLoadTransactionState _fileSelectLoadTransaction = new();
     private long _transitionHookSequence;
     private int _proxyResetRequests => _movementSession.State.ManualResetRequests;
     private int _proxyResetCompletions => _movementSession.State.ManualResetCompletions;
@@ -615,6 +616,7 @@ public sealed class CoopFeasibility : IMod
             Event.RemoveListener<SaveLoadedEvent>(OnSaveLoaded);
             Event.RemoveListener<RoomLayerLoadEvent>(OnRoomLayerLoaded);
             _movementSession.Unload();
+            CancelFileSelectLoadTransaction(FileSelectLoadTransactionReason.Unload);
             CloseNativeLoadBootstrap("UNLOAD");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _locomotionState.Invalidate();
@@ -851,6 +853,7 @@ public sealed class CoopFeasibility : IMod
         {
             _diagnosticFrame = e.Frame;
             _vsyncCalls++;
+            ObserveFileSelectLoadTransaction(e.Memory);
             if (!_virtualKeyboard && Controller.Connected2 != _previousConnected)
             {
                 _previousConnected = Controller.Connected2;
@@ -918,7 +921,6 @@ public sealed class CoopFeasibility : IMod
             ReleaseVirtualKeys();
             _pad2Source.Reset();
             _movementSession.PlayerReloaded();
-            CloseNativeLoadBootstrap("PLAYER_LOADED");
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             _tetherPolicy.Reduce(new TetherObservation(0, 0, TetherMovementIntent.None,
@@ -985,7 +987,12 @@ public sealed class CoopFeasibility : IMod
 
     private void ArmNativeLoadBootstrap(MovementTransitionTraceSource source, string detail)
     {
-        _nativeLoadBootstrap.Arm();
+        if (!_nativeLoadBootstrap.Armed)
+        {
+            ManagedMovementSessionState beforeLoad = _movementSession.State;
+            if (beforeLoad.RoomKnown) _nativeLoadBootstrap.Arm(beforeLoad.Room);
+            else _nativeLoadBootstrap.Arm();
+        }
         _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
         _reconstructionTriggerReason = TetherReason.Reconstruction;
         TraceTransition(source, default, detail, "none");
@@ -1325,8 +1332,11 @@ public sealed class CoopFeasibility : IMod
             _reconstructionRetry = ReconstructionRetryPolicy.ClearCurrent(_reconstructionRetry);
             _reconstructionTriggerReason = TetherReason.Reconstruction;
             if (bootstrapClosed)
+            {
+                _fileSelectLoadTransaction.Complete();
                 TraceTransition(MovementTransitionTraceSource.BootstrapClosed, observedRoom.ManagedKey(),
                     "RECONSTRUCTED", "none");
+            }
             TraceTransition(MovementTransitionTraceSource.Reconstruction, observedRoom.ManagedKey(),
                 bootstrapClosed ? "Selected:bootstrap-closed-post-load-identity" : reconstruction.ToString(),
                 "cleared");
@@ -2990,6 +3000,7 @@ public sealed class CoopFeasibility : IMod
 
     private void CloseNativeLoadBootstrapIfTerminal()
     {
+        if (_fileSelectLoadTransaction.BootstrapArmed) return;
         if (!Game.Available || !Game.InGame) CloseNativeLoadBootstrap("NON_PLAY");
         else if (Game.MenuOpen || Game.MapOpen) CloseNativeLoadBootstrap("MENU_MAP");
     }
@@ -2998,6 +3009,41 @@ public sealed class CoopFeasibility : IMod
     {
         if (_nativeLoadBootstrap.Close())
             TraceTransition(MovementTransitionTraceSource.BootstrapClosed, _movementSession.State.Room, reason, "none");
+    }
+
+    private void ObserveFileSelectLoadTransaction(IMemory memory)
+    {
+        if (!Game.Available) return;
+        var observation = new FileSelectLoadObservation((int)Game.State,
+            memory.ReadU32(GameStepAddress), memory.ReadU32(EngineStepAddress), Game.IsLoading);
+        FileSelectLoadTransactionTransition transition = _fileSelectLoadTransaction.Observe(observation);
+        string reason = transition.Reason.ToString();
+        if (transition.Has(FileSelectLoadTransactionAction.FileSelectObserved))
+            TraceTransition(MovementTransitionTraceSource.FileSelectObserved,
+                _movementSession.State.Room, reason, "none");
+        if (transition.Has(FileSelectLoadTransactionAction.LoadingObserved))
+            TraceTransition(MovementTransitionTraceSource.FileSelectLoading,
+                _movementSession.State.Room, reason, "none");
+        if (transition.Has(FileSelectLoadTransactionAction.ArmBootstrap))
+        {
+            ArmNativeLoadBootstrap(MovementTransitionTraceSource.FileSelectArm,
+                $"vsync:{reason}");
+        }
+        if (transition.Has(FileSelectLoadTransactionAction.Cancel))
+            TraceTransition(MovementTransitionTraceSource.FileSelectCancel,
+                _movementSession.State.Room, reason, "none");
+        if (transition.Has(FileSelectLoadTransactionAction.CancelBootstrap))
+            CloseNativeLoadBootstrap($"FILE_SELECT:{reason}");
+    }
+
+    private void CancelFileSelectLoadTransaction(FileSelectLoadTransactionReason reason)
+    {
+        FileSelectLoadTransactionTransition transition = _fileSelectLoadTransaction.Cancel(reason);
+        if (!transition.Has(FileSelectLoadTransactionAction.Cancel)) return;
+        TraceTransition(MovementTransitionTraceSource.FileSelectCancel,
+            _movementSession.State.Room, reason.ToString(), "none");
+        if (transition.Has(FileSelectLoadTransactionAction.CancelBootstrap))
+            CloseNativeLoadBootstrap($"FILE_SELECT:{reason}");
     }
 
     private static int AnimationFrameCount(ManagedAnimation animation) =>
@@ -3826,6 +3872,7 @@ public sealed class CoopFeasibility : IMod
         if (!DiagnosticResetPreparationPolicy.CommitPreparedReducers(preparation, attackPreflight,
             ref _attackLease, _movementSession, _jumpForgiveness, _stance, _locomotionState,
             _reconstructionPolicy)) return false;
+        CancelFileSelectLoadTransaction(FileSelectLoadTransactionReason.DiagnosticReset);
         CloseNativeLoadBootstrap("DIAGNOSTIC_RESET");
         bool cleanupQuarantined = _attackQuarantineSlot >= 0;
         _diagnosticGeneration = preparation.NextDiagnosticGeneration;
@@ -3994,6 +4041,7 @@ public sealed class CoopFeasibility : IMod
         }
         catch { /* Preserve the original circuit-breaker evidence on diagnostic exhaustion. */ }
         _movementSession.Fatal();
+        CancelFileSelectLoadTransaction(FileSelectLoadTransactionReason.Fatal);
         CloseNativeLoadBootstrap("FATAL");
         _reconstructionRetry = ReconstructionRetryPolicy.TerminalFault(
             _reconstructionRetry, TetherReason.Fatal);

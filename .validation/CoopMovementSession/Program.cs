@@ -2,6 +2,70 @@ using CoopFeasibilityMod;
 
 var tests = new List<(string Name, Action Run)>
 {
+    ("file select load transaction arms through loading before Play", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        FileSelectLoadTransactionTransition observed = transaction.Observe(FileSelect());
+        True(observed.Has(FileSelectLoadTransactionAction.FileSelectObserved));
+        False(transaction.BootstrapArmed);
+        FileSelectLoadTransactionTransition loading = transaction.Observe(Observation(8, 6, 0x100));
+        True(loading.Has(FileSelectLoadTransactionAction.LoadingObserved));
+        True(loading.Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        True(transaction.BootstrapArmed);
+        False(transaction.Observe(Observation(8, 6, 0x101)).Has(FileSelectLoadTransactionAction.Cancel));
+        False(transaction.Observe(Observation(8, 6, 0x104)).Has(FileSelectLoadTransactionAction.Cancel));
+        transaction.Observe(Observation(4, 6, 0x104, loading: true));
+        transaction.Observe(Observation(2, 3, 1));
+        Equal(FileSelectLoadTransactionPhase.PlayObserved, transaction.Phase);
+        True(transaction.BootstrapArmed);
+    }),
+    ("file select cancel back never arms", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(FileSelect());
+        FileSelectLoadTransactionTransition cancel = transaction.Observe(Observation(8, 6, 2, loading: true));
+        True(cancel.Has(FileSelectLoadTransactionAction.Cancel));
+        False(cancel.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+        Equal(FileSelectLoadTransactionReason.ReturnedToMainMenuIdle, cancel.Reason);
+        False(transaction.BootstrapArmed);
+    }),
+    ("file select transaction times out bounded", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState(2);
+        transaction.Observe(FileSelect());
+        False(transaction.Observe(FileSelect()).Has(FileSelectLoadTransactionAction.Cancel));
+        FileSelectLoadTransactionTransition timeout = transaction.Observe(FileSelect());
+        True(timeout.Has(FileSelectLoadTransactionAction.Cancel));
+        Equal(FileSelectLoadTransactionReason.Timeout, timeout.Reason);
+        Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+    }),
+    ("file select transaction remains bounded after Play", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState(3);
+        transaction.Observe(FileSelect());
+        transaction.Observe(Observation(8, 6, 0x100));
+        transaction.Observe(Observation(2, 3, 1));
+        FileSelectLoadTransactionTransition timeout = transaction.Observe(Observation(2, 3, 1));
+        True(timeout.Has(FileSelectLoadTransactionAction.CancelBootstrap));
+        Equal(FileSelectLoadTransactionReason.Timeout, timeout.Reason);
+    }),
+    ("new game and unsupported selector paths fail closed", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        transaction.Observe(FileSelect());
+        FileSelectLoadTransactionTransition unsupported = transaction.Observe(Observation(8, 6, 0x10));
+        True(unsupported.Has(FileSelectLoadTransactionAction.Cancel));
+        False(unsupported.Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        Equal(FileSelectLoadTransactionReason.UnsupportedFileSelectPath, unsupported.Reason);
+    }),
+    ("ordinary Play room transition never arms file select load", () =>
+    {
+        var transaction = new FileSelectLoadTransactionState();
+        False(transaction.Observe(Observation(2, 3, 1)).Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        False(transaction.Observe(Observation(2, 4, 3, loading: true)).Has(FileSelectLoadTransactionAction.ArmBootstrap));
+        False(transaction.BootstrapArmed);
+        Equal(FileSelectLoadTransactionPhase.Idle, transaction.Phase);
+    }),
     ("third safe update requests initialization", () =>
     {
         ManagedMovementSessionReducer session = NewSession();
@@ -108,6 +172,19 @@ var tests = new List<(string Name, Action Run)>
         True(bootstrap.Armed);
         bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.AdapterFault);
         Equal(NativeLoadBootstrapPhase.Suspended, bootstrap.Phase);
+    }),
+    ("native load bootstrap keeps retained room reconstruction provisional", () =>
+    {
+        var bootstrap = new NativeLoadBootstrapState();
+        bootstrap.Arm(Room(44));
+        bootstrap.ObserveQualifyingPostUpdate();
+        bootstrap.ObserveQualifyingPostUpdate();
+        bootstrap.ConsumeSafeBaseline();
+        False(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(44)));
+        Equal(NativeLoadBootstrapPhase.ProvisionalSelected, bootstrap.Phase);
+        True(bootstrap.Armed);
+        True(bootstrap.CompleteReconstruction(ManagedMovementReconstructionResult.Selected, Room(140)));
+        False(bootstrap.Armed);
     }),
     ("SaveLoaded bootstrap closes after stable reconstruction", () =>
     {
@@ -693,6 +770,9 @@ static uint Next(uint value)
 
 static ulong Mix(ulong hash, ulong value) => unchecked((hash ^ value) * 1099511628211UL);
 static ManagedRoomKey Room(byte room) => new(1, room, 0, 0, 0, 256, 240);
+static FileSelectLoadObservation FileSelect() => Observation(8, 6, 0x33);
+static FileSelectLoadObservation Observation(int state, uint gameStep, uint engineStep,
+    bool loading = false) => new(state, gameStep, engineStep, loading);
 
 static void SetRevision(ManagedMovementSessionReducer reducer, ulong revision)
 {

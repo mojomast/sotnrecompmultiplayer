@@ -15,6 +15,10 @@ public enum MovementTransitionTraceSource : byte
     BootstrapSafe,
     BootstrapSample,
     BootstrapClosed,
+    FileSelectObserved,
+    FileSelectLoading,
+    FileSelectArm,
+    FileSelectCancel,
 }
 
 // Fixed-size lifecycle evidence for diagnosing transition ordering without retaining gameplay history.

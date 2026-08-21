@@ -7,6 +7,7 @@ public enum NativeLoadBootstrapPhase : byte
     Closed,
     Armed,
     BaselineObserved,
+    ProvisionalSelected,
     Suspended,
 }
 
@@ -17,9 +18,20 @@ public sealed class NativeLoadBootstrapState
     public int ConsecutiveQualifyingSamples { get; private set; }
     public bool Stable => ConsecutiveQualifyingSamples >= RequiredQualifyingSamples;
     public const int RequiredQualifyingSamples = 2;
+    private bool _preLoadRoomKnown;
+    private ManagedRoomKey _preLoadRoom;
 
     public void Arm()
     {
+        _preLoadRoomKnown = false;
+        ConsecutiveQualifyingSamples = 0;
+        Phase = NativeLoadBootstrapPhase.Armed;
+    }
+
+    public void Arm(ManagedRoomKey preLoadRoom)
+    {
+        _preLoadRoom = preLoadRoom;
+        _preLoadRoomKnown = true;
         ConsecutiveQualifyingSamples = 0;
         Phase = NativeLoadBootstrapPhase.Armed;
     }
@@ -36,7 +48,9 @@ public sealed class NativeLoadBootstrapState
     {
         if (!Armed) return;
         ConsecutiveQualifyingSamples = 0;
-        if (Phase == NativeLoadBootstrapPhase.BaselineObserved) Phase = NativeLoadBootstrapPhase.Armed;
+        if (Phase is NativeLoadBootstrapPhase.BaselineObserved or
+            NativeLoadBootstrapPhase.ProvisionalSelected)
+            Phase = NativeLoadBootstrapPhase.Armed;
     }
 
     // True exactly once per load, when a fully-gated post-update room becomes the
@@ -57,7 +71,13 @@ public sealed class NativeLoadBootstrapState
             Phase = NativeLoadBootstrapPhase.Suspended;
             return false;
         }
+        if (_preLoadRoomKnown && _preLoadRoom.SameRoomAs(reconstructedRoom))
+        {
+            Phase = NativeLoadBootstrapPhase.ProvisionalSelected;
+            return false;
+        }
         Phase = NativeLoadBootstrapPhase.Closed;
+        _preLoadRoomKnown = false;
         ConsecutiveQualifyingSamples = 0;
         return true;
     }
@@ -68,6 +88,7 @@ public sealed class NativeLoadBootstrapState
     public bool Close()
     {
         if (!Armed) return false;
+        _preLoadRoomKnown = false;
         ConsecutiveQualifyingSamples = 0;
         Phase = NativeLoadBootstrapPhase.Closed;
         return true;

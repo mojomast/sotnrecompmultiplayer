@@ -297,7 +297,14 @@ internal static partial class Program
 
         ValidateOrdering(source, "private void OnPlayerLoaded(", "private void OnSaveLoaded(",
             ["_movementSession.PlayerReloaded();", "_locomotionState.Invalidate();", "ResetManagedHealth();"]);
-        if (!source.Contains("Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);", StringComparison.Ordinal) ||
+        if (!source.Contains("ObserveFileSelectLoadTransaction(e.Memory);", StringComparison.Ordinal) ||
+            !source.Contains("private readonly FileSelectLoadTransactionState _fileSelectLoadTransaction = new();", StringComparison.Ordinal) ||
+            !source.Contains("FileSelectLoadTransactionAction.ArmBootstrap", StringComparison.Ordinal) ||
+            !source.Contains("MovementTransitionTraceSource.FileSelectObserved", StringComparison.Ordinal) ||
+            !source.Contains("MovementTransitionTraceSource.FileSelectLoading", StringComparison.Ordinal) ||
+            !source.Contains("MovementTransitionTraceSource.FileSelectArm", StringComparison.Ordinal) ||
+            !source.Contains("MovementTransitionTraceSource.FileSelectCancel", StringComparison.Ordinal) ||
+            !source.Contains("Event.AddListener<SaveLoadedEvent>(OnSaveLoaded);", StringComparison.Ordinal) ||
             source.Contains("_nativeLoadBootstrap.Arm(beforeReload", StringComparison.Ordinal) ||
             !source.Contains("private void OnSaveLoaded(SaveLoadedEvent e)", StringComparison.Ordinal) ||
             !source.Contains("private const uint NativeLoadApplySaveDataReturn = 0x800F31DC;", StringComparison.Ordinal) ||
@@ -311,7 +318,7 @@ internal static partial class Program
             !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"armed:sel-post\")", StringComparison.Ordinal) ||
             !source.Contains("ArmNativeLoadBootstrap(MovementTransitionTraceSource.SaveLoaded, \"event-supplementary\")", StringComparison.Ordinal) ||
             source.Contains("e.Block", StringComparison.Ordinal))
-            throw new InvalidOperationException("Native load bootstrap must use the gated DRA and file-select post-hooks with SaveLoadedEvent supplementary only.");
+            throw new InvalidOperationException("Native load bootstrap must be VSync-authorized from file select with save callbacks supplementary only.");
         if (!source.Contains("IsNativeLoadQualifyingPostUpdate(memory)", StringComparison.Ordinal) ||
             !source.Contains("_nativeLoadBootstrap.Stable", StringComparison.Ordinal) ||
             !source.Contains("memory.ReadU32(GameStepAddress) == (uint)PlayStep.Default", StringComparison.Ordinal) ||
